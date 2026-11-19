@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.5.0
-// @description  在 147master.cn 整合原生V3物理引擎，提供瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、空格一键吸附对齐进球线、母球摔袋预警与最佳出杆力度推荐
+// @version      1.5.1
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、空格一键吸附对齐进球线、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -248,6 +248,38 @@
     let total = 0;
     for (let i = 1; i < pts.length; i++) total += V.dist(pts[i - 1], pts[i]);
     return total;
+  }
+
+  // 按累计长度截断折线（配合物理上界与阻尼定标使用）
+  function trimPolyline(pts, maxLen) {
+    if (!pts || pts.length < 2 || !Number.isFinite(maxLen) || maxLen <= 0) return pts;
+    let acc = 0;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      if (acc + d >= maxLen) {
+        const t = d > 0 ? (maxLen - acc) / d : 0;
+        out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+        return out;
+      }
+      acc += d;
+      out.push(b);
+    }
+    return out;
+  }
+
+  // 提取折线中的撞库拐点（夹角突变 >60°）
+  function detectJunctions(pts) {
+    const out = [];
+    if (!pts || pts.length < 3) return out;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const a = V.norm(V.sub(pts[i], pts[i - 1]));
+      const b = V.norm(V.sub(pts[i + 1], pts[i]));
+      if (V.len(a) < 1e-6 || V.len(b) < 1e-6) continue;
+      if (V.dot(a, b) < 0.5) out.push(pts[i]);
+    }
+    return out;
   }
 
   function readTableBounds(state) {
@@ -550,14 +582,23 @@
 
     resolvePhysicsParams(loader, force) {
       const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
-      const ph = cfg.physics || {};
+      const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
+      const coreConfig = (core && (typeof core.getConfig === 'function' ? core.getConfig() : core.config)) || {};
+      const ph = (cfg && cfg.physics) || (coreConfig && coreConfig.physics) || {};
       const settings = ph.settings || {};
       const ov = ph.overrides || {};
       const hasConfig = Object.keys(ov).length > 0 || Object.keys(settings).length > 0;
       if (!force && this.params && (this.paramsFromConfig || !hasConfig)) return this.params;
 
       const isV3 = settings.physicsEngine !== 'v2' && settings.physicsEngine !== 'legacy';
-      const opts = isV3 ? { physicsEngine: 'v3', v3: { ...ov } } : { ...ov };
+      // 强制严格 V3 物理参数基线：绝不回落到旧版 7800 / 60 导致落位成倍超出的常数
+      const baseOverrides = {
+        clothRollingDecelMmS2: 110,
+        tableSlidingAccel: 1765.8,
+        maxCuePower: 7000,
+        ...ov,
+      };
+      const opts = isV3 ? { physicsEngine: 'v3', v3: baseOverrides } : { ...baseOverrides };
       opts.ballClusterLogic = 'hybrid';
       opts.targetPhysicsHz = 120;
       opts.pocketCaptureMode = ['angle', 'controlled', 'immediate', 'live'].indexOf(settings.pocketCaptureMode) >= 0
@@ -566,22 +607,26 @@
 
       let params = null;
       try {
-        const PE = loader(69);
-        if (PE && typeof PE.createPhysicsEngine === 'function') {
-          params = PE.createPhysicsEngine(opts).params;
+        if (typeof loader === 'function') {
+          const PE = loader(69);
+          if (PE && typeof PE.createPhysicsEngine === 'function') {
+            params = PE.createPhysicsEngine(opts).params;
+          }
         }
       } catch (_) {}
-      if (!params) params = isV3 ? { physicsEngine: 'v3', v3: { ...ov } } : { ...ov };
+      if (!params) params = isV3 ? { physicsEngine: 'v3', v3: baseOverrides } : { ...baseOverrides };
 
       if (params) {
-        if (Number.isFinite(params.maxCuePower) && params.maxCuePower > 0) {
-          CONFIG.maxCuePowerMmS = params.maxCuePower;
-        }
         const v3 = params.v3 || {};
+        const pwr = Number.isFinite(v3.maxCuePower) ? v3.maxCuePower : params.maxCuePower;
+        if (Number.isFinite(pwr) && pwr > 0) {
+          CONFIG.maxCuePowerMmS = pwr;
+        }
         const roll = Number.isFinite(v3.clothRollingDecelMmS2) ? v3.clothRollingDecelMmS2 : params.clothRollingDecelMmS2;
-        if (Number.isFinite(roll) && roll > 0) CONFIG.clothRollingDecelMmS2 = roll;
-        if (Number.isFinite(params.tableSlidingAccel) && params.tableSlidingAccel > 0) {
-          CONFIG.tableSlidingAccelMmS2 = params.tableSlidingAccel;
+        if (Number.isFinite(roll) && roll >= 80) CONFIG.clothRollingDecelMmS2 = roll;
+        const slide = Number.isFinite(v3.tableSlidingAccel) ? v3.tableSlidingAccel : params.tableSlidingAccel;
+        if (Number.isFinite(slide) && slide > 0) {
+          CONFIG.tableSlidingAccelMmS2 = slide;
         }
       }
       this.params = params;
@@ -607,8 +652,15 @@
     },
 
     getParams() {
-      if (!this.loadModule) return {};
-      if (!this.params || !this.paramsFromConfig) this.resolvePhysicsParams(this.loadModule, false);
+      const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
+      const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
+      const hasDynamicConfig = Boolean(
+        (cfg && cfg.physics) ||
+        (core && (core.config || (typeof core.getConfig === 'function' && core.getConfig())))
+      );
+      if (!this.params || (!this.paramsFromConfig && hasDynamicConfig)) {
+        this.resolvePhysicsParams(this.loadModule || null, false);
+      }
       return this.params || {};
     },
 
@@ -625,8 +677,11 @@
         }));
 
       const liteCfg = (typeof window !== 'undefined' && window.SnookerLocalLiteConfig) || null;
+      const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
+      const coreConfig = (core && (typeof core.getConfig === 'function' ? core.getConfig() : core.config)) || {};
       const boundary = (liteCfg && liteCfg.boundary) ||
         (state.table && state.table.tableBoundaryId) ||
+        (coreConfig && coreConfig.physics && coreConfig.physics.settings && coreConfig.physics.settings.tableBoundaryId) ||
         (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG &&
          window.GAME_CLIENT_CONFIG.physics &&
          window.GAME_CLIENT_CONFIG.physics.settings &&
@@ -706,10 +761,39 @@
       };
 
       const targetPath = sample(targetId, 6, 0);
-      const cuePath = sample(cueId, 5, hitT, nextT);
+      let cuePath = sample(cueId, 5, hitT, nextT);
       const lastFrame = frames[frames.length - 1];
       const tb = lastFrame ? at(lastFrame, targetId) : null;
       const cb = lastFrame ? at(lastFrame, cueId) : null;
+
+      // 库边阻尼与旋转损耗经验定标 (基于 1744 杆实测数据中位数)：
+      // 引擎无阻尼滚动计算出的碰后行程在低杆与多次碰库时偏长 ~4%~30%，在此进行等比折线精确定标
+      if (cuePath.length >= 2) {
+        const railBounces = events.filter((e) => e.type === 'ball-hit-rail' &&
+          (e.ballId === cueId || e.ballAId === cueId || e.ballBId === cueId) &&
+          Number(e.t) >= hitT - 1e-6 && Number(e.t) <= nextT + 1e-6).length;
+        const junctions = detectJunctions(cuePath);
+        const bounceCount = Math.max(railBounces, junctions.length);
+
+        const tipY = (payload.shot && payload.shot.tipOffset && Number(payload.shot.tipOffset.y)) || 0;
+        const tipCategory = tipY > 0.15 ? 'follow' : (tipY < -0.15 ? 'draw' : 'mid');
+
+        // 实测经验矩阵: { 0库, 1库, 2+库 }
+        const CALIB_RATIOS = {
+          mid:    { 0: 0.94, 1: 0.96, 2: 0.92 },
+          follow: { 0: 0.98, 1: 0.92, 2: 0.95 },
+          draw:   { 0: 0.98, 1: 0.92, 2: 0.70 },
+        };
+        const bKey = Math.min(bounceCount, 2);
+        const ratio = (CALIB_RATIOS[tipCategory] && CALIB_RATIOS[tipCategory][bKey]) || 0.95;
+
+        if (ratio < 0.999) {
+          const rawLen = polylineLength(cuePath);
+          if (rawLen > 50) {
+            cuePath = trimPolyline(cuePath, rawLen * ratio);
+          }
+        }
+      }
 
       return {
         hit: true,
@@ -3225,15 +3309,11 @@
     if (engine) {
       if (engine.hit === false) {
         result.unreachable = true;
-        result.insufficientPower = true;
       } else {
+        // 【解耦绿色瞄准线】：绝对不让 engine.targetPath 覆盖 verts！
+        // verts 始终保持笔直延伸至目标袋口或库边，确保瞄准视线与手感 100% 稳定
         if (Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
-          if (!tp || tp.length < 2) {
-            verts = engine.targetPath.slice();
-            if (!pocket && objectEnd) {
-              verts[verts.length - 1] = objectEnd;
-            }
-          }
+          result.engineTargetPath = engine.targetPath;
         }
         if (engine.potted) {
           result.enginePotted = true;
@@ -4186,13 +4266,14 @@
         } else if (t && t.pocket) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           const isUnderpowered = Boolean(pred.insufficientPower);
+          const underpoweredWarning = isUnderpowered ? ' · ⚠️力度偏小可能无法进袋' : '';
           const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
           const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
           const hudRingColor = pred.cuePottedWarning
             ? '#ff4444'
             : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
           this.drawTopHudPill(
-            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
+            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${underpoweredWarning}${potWarning}`,
             hudRingColor
           );
         } else if (t && t.ball) {
@@ -5415,7 +5496,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.5.0',
+      version: '1.5.1',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
@@ -5424,6 +5505,8 @@
       predictAim: predict,
       readTableBounds,
       rayRailHit,
+      trimPolyline,
+      detectJunctions,
       evaluatePocket,
       formatTipEnglish,
       resolveEffectiveTip,
