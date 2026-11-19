@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.4.5
-// @description  在 147master.cn 整合原生V3物理引擎，提供瞄准延长线、母球高低杆走位预测弧线、吃库反弹线、CIT摩擦抛投修正、空格一键吸附对齐进球线、最佳出杆力度推荐
+// @version      1.5.0
+// @description  在 147master.cn 整合原生V3物理引擎，提供瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、空格一键吸附对齐进球线、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -57,9 +57,17 @@
     // 功能开关默认值
     showObjectLine: true,
     showCueLine: true,
+    showCuePostTrajectory: true,
     doubleClickAlign: true,
     showHudPill: true,
     showDebug: false,
+
+    // 官方物理引擎仿真微推演 (在击打目标球时提供真实母球划弧走位与多库反弹)
+    engineSimEnabled: true,
+    engineSimDelayMs: 90,
+    cuePostTrajectoryColor: '#86cfff',
+    cuePostTrajectoryWidthPx: 1.6,
+    showGhostStopPosition: true,
 
     // 物理常数（完全对齐 147master 原生 V3 物理引擎）
     maxCuePowerMmS: 7000,
@@ -107,6 +115,7 @@
   const TOGGLE_KEYS = [
     'showObjectLine',
     'showCueLine',
+    'showCuePostTrajectory',
     'showCushionRebound',
     'doubleClickAlign',
     'showHudPill',
@@ -458,6 +467,309 @@
       NativeWorkerBridge.initWindow(unsafeWindow);
     }
   } catch (_) {}
+
+  /* ================================================================== */
+  /* 官方物理引擎无头微模拟器 (沙箱提取 game-core 模块 68 进行逐帧物理推演)  */
+  /* ================================================================== */
+
+  const engineSim = {
+    status: 'idle', // idle | loading | ready | failed
+    error: null,
+    fn: null,
+    key: null,
+    result: null,
+    timer: 0,
+    pendingKey: null,
+    payloadFactory: null,
+    simMs: 0,
+    frames: 0,
+
+    bundleUrl() {
+      const cfg = (typeof window !== 'undefined' && window.SnookerLocalLiteConfig) || null;
+      const prefix = (cfg && typeof cfg.prefix === 'string' && cfg.prefix) || '/engine/local-lite/';
+      return prefix.replace(/\/+$/, '') + '/runtime/game-core.bundle.js';
+    },
+
+    load() {
+      if (this.status !== 'idle') return;
+      this.status = 'loading';
+      if (typeof fetch !== 'function') {
+        this.status = 'failed';
+        this.error = 'fetch unavailable';
+        return;
+      }
+      fetch(this.bundleUrl(), { cache: 'force-cache' })
+        .then((res) => {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.text();
+        })
+        .then((src) => {
+          const idx = src.lastIndexOf('load(0);');
+          if (idx < 0) throw new Error('bundle 入口未找到');
+
+          // 快照隔离保护：保留页面原有的 window.Snooker* 全局，绝不干扰游戏本体
+          const snapshot = {};
+          if (typeof window !== 'undefined') {
+            for (const key of Object.keys(window)) {
+              if (key.startsWith('Snooker')) snapshot[key] = window[key];
+            }
+          }
+
+          (0, eval)(src.slice(0, idx) + 'window.__snkAimLoad = load;\n})();');
+          const loader = window.__snkAimLoad;
+          if (typeof loader !== 'function') throw new Error('loader 提取失败');
+
+          const rt = loader(68);
+          if (!rt || typeof rt.simulateShot !== 'function') throw new Error('simulateShot 缺失');
+          this.fn = rt.simulateShot;
+
+          const payloadMod = loader(2);
+          this.__payload = (payloadMod && typeof payloadMod.createShotRuntimePayload === 'function') ? payloadMod : null;
+
+          // 恢复页面原有的 Snooker* 全局，清掉本次 eval 临时注入的
+          if (typeof window !== 'undefined') {
+            for (const key of Object.keys(window)) {
+              if (key.startsWith('Snooker') && !(key in snapshot)) {
+                try { delete window[key]; } catch (_) {}
+              }
+            }
+            for (const key of Object.keys(snapshot)) {
+              window[key] = snapshot[key];
+            }
+          }
+
+          this.loadModule = loader;
+          this.params = this.resolvePhysicsParams(loader);
+          this.status = 'ready';
+        })
+        .catch((err) => {
+          this.status = 'failed';
+          this.error = String((err && err.message) || err);
+        });
+    },
+
+    resolvePhysicsParams(loader, force) {
+      const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
+      const ph = cfg.physics || {};
+      const settings = ph.settings || {};
+      const ov = ph.overrides || {};
+      const hasConfig = Object.keys(ov).length > 0 || Object.keys(settings).length > 0;
+      if (!force && this.params && (this.paramsFromConfig || !hasConfig)) return this.params;
+
+      const isV3 = settings.physicsEngine !== 'v2' && settings.physicsEngine !== 'legacy';
+      const opts = isV3 ? { physicsEngine: 'v3', v3: { ...ov } } : { ...ov };
+      opts.ballClusterLogic = 'hybrid';
+      opts.targetPhysicsHz = 120;
+      opts.pocketCaptureMode = ['angle', 'controlled', 'immediate', 'live'].indexOf(settings.pocketCaptureMode) >= 0
+        ? settings.pocketCaptureMode : 'angle';
+      opts.pocketVisualMotionEnabled = true;
+
+      let params = null;
+      try {
+        const PE = loader(69);
+        if (PE && typeof PE.createPhysicsEngine === 'function') {
+          params = PE.createPhysicsEngine(opts).params;
+        }
+      } catch (_) {}
+      if (!params) params = isV3 ? { physicsEngine: 'v3', v3: { ...ov } } : { ...ov };
+
+      if (params) {
+        if (Number.isFinite(params.maxCuePower) && params.maxCuePower > 0) {
+          CONFIG.maxCuePowerMmS = params.maxCuePower;
+        }
+        const v3 = params.v3 || {};
+        const roll = Number.isFinite(v3.clothRollingDecelMmS2) ? v3.clothRollingDecelMmS2 : params.clothRollingDecelMmS2;
+        if (Number.isFinite(roll) && roll > 0) CONFIG.clothRollingDecelMmS2 = roll;
+        if (Number.isFinite(params.tableSlidingAccel) && params.tableSlidingAccel > 0) {
+          CONFIG.tableSlidingAccelMmS2 = params.tableSlidingAccel;
+        }
+      }
+      this.params = params;
+      this.paramsFromConfig = hasConfig;
+      return params;
+    },
+
+    payloadApi() {
+      if (this.__payload) return this.__payload;
+      const globalApi = typeof window !== 'undefined' && window.SnookerShotRuntimePayload;
+      if (globalApi && typeof globalApi.createShotRuntimePayload === 'function') {
+        this.__payload = globalApi;
+        return globalApi;
+      }
+      try {
+        const mod = this.loadModule ? this.loadModule(2) : null;
+        if (mod && typeof mod.createShotRuntimePayload === 'function') {
+          this.__payload = mod;
+          return mod;
+        }
+      } catch (_) {}
+      return null;
+    },
+
+    getParams() {
+      if (!this.loadModule) return {};
+      if (!this.params || !this.paramsFromConfig) this.resolvePhysicsParams(this.loadModule, false);
+      return this.params || {};
+    },
+
+    buildPayload(state, shot) {
+      const api = this.payloadApi();
+      const balls = (state.balls || [])
+        .filter((b) => b && b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y))
+        .map((b) => ({
+          id: b.id,
+          kind: b.kind,
+          pos: { x: b.pos.x, y: b.pos.y },
+          radius: Number.isFinite(b.radius) ? b.radius : BALL_RADIUS_MM,
+          potted: Boolean(b.potted),
+        }));
+
+      const liteCfg = (typeof window !== 'undefined' && window.SnookerLocalLiteConfig) || null;
+      const boundary = (liteCfg && liteCfg.boundary) ||
+        (state.table && state.table.tableBoundaryId) ||
+        (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG &&
+         window.GAME_CLIENT_CONFIG.physics &&
+         window.GAME_CLIENT_CONFIG.physics.settings &&
+         window.GAME_CLIENT_CONFIG.physics.settings.tableBoundaryId) ||
+        'local-table-892b5cb90e552ac1a09f-pockets-v2';
+
+      const payloadObj = {
+        tableBoundaryId: boundary,
+        cueBallId: state.cueBallId || 'cue',
+        balls,
+        shot: {
+          direction: { x: shot.direction.x, y: shot.direction.y },
+          power: shot.power,
+          tipOffset: { x: shot.tip.x, y: shot.tip.y },
+          verticalAngle: shot.verticalAngle || 0,
+        },
+        physicsOverrides: this.getParams(),
+      };
+
+      if (api && typeof api.createShotRuntimePayload === 'function') {
+        try {
+          return api.createShotRuntimePayload(payloadObj);
+        } catch (_) {}
+      }
+      return payloadObj;
+    },
+
+    run(payload) {
+      const started = performance.now();
+      const res = this.fn(payload);
+      this.simMs = Math.max(0, Math.round(performance.now() - started));
+      const frames = Array.isArray(res.frames) ? res.frames : [];
+      const events = Array.isArray(res.events) ? res.events : [];
+      this.frames = frames.length;
+      const cueId = payload.cueBallId || 'cue';
+      const hit = events.find((e) => e.type === 'ball-hit-ball' &&
+        (e.ballAId === cueId || e.ballBId === cueId));
+
+      if (!hit) {
+        return {
+          hit: false,
+          targetId: null,
+          targetPath: [],
+          cuePath: [],
+          potted: false,
+          cuePotted: false,
+          simMs: this.simMs,
+          frames: frames.length,
+        };
+      }
+
+      const targetId = hit.ballAId === cueId ? hit.ballBId : hit.ballAId;
+      const hitT = Number(hit.t) || 0;
+      const at = (frame, id) => (frame.balls || []).find((b) => b.id === id) || null;
+
+      const cueNext = events
+        .filter((e) => e.type === 'ball-hit-ball'
+          && (e.ballAId === cueId || e.ballBId === cueId)
+          && e !== hit
+          && Number(e.t) > hitT + 1e-6)
+        .sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0))[0] || null;
+      const nextT = cueNext ? (Number(cueNext.t) || 0) : Infinity;
+      const nextBallId = cueNext ? (cueNext.ballAId === cueId ? cueNext.ballBId : cueNext.ballAId) : null;
+
+      const sample = (id, minStep, fromT, toT) => {
+        const pts = [];
+        let last = null;
+        for (const f of frames) {
+          if (f.t + 1e-6 < fromT) continue;
+          if (Number.isFinite(toT) && f.t > toT + 1e-6) break;
+          const b = at(f, id);
+          if (!b || !b.pos) continue;
+          const p = { x: b.pos.x, y: b.pos.y };
+          if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= minStep) { pts.push(p); last = p; }
+        }
+        return pts;
+      };
+
+      const targetPath = sample(targetId, 6, 0);
+      const cuePath = sample(cueId, 5, hitT, nextT);
+      const lastFrame = frames[frames.length - 1];
+      const tb = lastFrame ? at(lastFrame, targetId) : null;
+      const cb = lastFrame ? at(lastFrame, cueId) : null;
+
+      return {
+        hit: true,
+        targetId,
+        targetPath,
+        cuePath,
+        potted: Boolean(tb && tb.potted),
+        cuePotted: Boolean(cb && cb.potted),
+        cueNextBallId: nextBallId,
+        cueNextT: Number.isFinite(nextT) ? nextT : null,
+        contactT: hitT,
+        simMs: this.simMs,
+        frames: frames.length,
+      };
+    },
+
+    get(key, factory) {
+      if (!CONFIG.engineSimEnabled) return null;
+      if (this.status === 'idle') this.load();
+      if (this.status === 'failed') return null;
+      if (this.key === key && this.result) return this.result;
+
+      const stale = this.result ? { ...this.result, stale: true } : null;
+
+      if (this.pendingKey === key) {
+        this.payloadFactory = factory;
+        return stale;
+      }
+      this.pendingKey = key;
+      this.payloadFactory = factory;
+
+      const run = () => {
+        this.timer = 0;
+        if (this.status === 'loading') {
+          this.timer = setTimeout(run, 120);
+          return;
+        }
+        if (this.status !== 'ready' || !this.fn) {
+          this.pendingKey = null;
+          return;
+        }
+        const pendingKey = this.pendingKey;
+        const factoryNow = this.payloadFactory;
+        try {
+          const result = this.run(factoryNow());
+          this.key = pendingKey;
+          this.result = result;
+        } catch (err) {
+          this.error = String((err && err.message) || err);
+          this.status = 'failed';
+          this.result = null;
+        }
+        this.pendingKey = null;
+      };
+
+      clearTimeout(this.timer);
+      this.timer = setTimeout(run, CONFIG.engineSimDelayMs || 90);
+      return stale;
+    },
+  };
 
   /* ================================================================== */
   /* 大厅主界面、结算弹窗、加载过渡与房间模式检测 (练球/好友/排名/大厅)  */
@@ -2875,7 +3187,7 @@
       }
     }
 
-    // 若原生引擎已预计算 targetPath (包含物理轨迹点序列)，直接采用原生路径；若未进袋且碰库，确保末端延伸至真实库内边
+    // 基础几何/原生Worker路径兜底
     let verts = [targetBall.pos, objectEnd];
     if (tp && tp.length >= 2) {
       verts = tp.slice();
@@ -2883,7 +3195,63 @@
         verts[verts.length - 1] = objectEnd;
       }
     }
-    result.physics = physics;
+
+    // 官方物理引擎无头微模拟器推演 (模块 68 真实复算)
+    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+    let engine = null;
+    if (CONFIG.engineSimEnabled) {
+      const engineKey = [
+        Math.round(effPower * 10),
+        Math.round(tip.x * 100),
+        Math.round(tip.y * 100),
+        Math.round(d.x * 1000),
+        Math.round(d.y * 1000),
+        Math.round(cue.pos.x),
+        Math.round(cue.pos.y),
+        vertAngle,
+        (state.table && state.table.tableBoundaryId) || '',
+        allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
+      ].join('|');
+
+      engine = engineSim.get(engineKey, () => engineSim.buildPayload(state, {
+        direction: d,
+        power: effPower,
+        tip,
+        verticalAngle: vertAngle,
+      }));
+    }
+    result.engineSim = engine;
+
+    if (engine) {
+      if (engine.hit === false) {
+        result.unreachable = true;
+        result.insufficientPower = true;
+      } else {
+        if (Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
+          if (!tp || tp.length < 2) {
+            verts = engine.targetPath.slice();
+            if (!pocket && objectEnd) {
+              verts[verts.length - 1] = objectEnd;
+            }
+          }
+        }
+        if (engine.potted) {
+          result.enginePotted = true;
+        }
+        if (engine.cuePotted) {
+          result.cuePottedWarning = true;
+        }
+
+        // 母球碰后真实走位弧线 (低杆拉杆回缩、高杆跟进、偏塞扎杆弧线与多库反弹)
+        if (CONFIG.showCuePostTrajectory && Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
+          const postPts = [{ x: G.x, y: G.y }, ...engine.cuePath];
+          result.cuePostTrajectory = postPts;
+          result.cueRestPos = postPts[postPts.length - 1];
+        }
+      }
+    }
+
+    result.physics = physics || Boolean(engine && engine.hit);
     result.target = {
       ball: targetBall,
       contact: G,
@@ -2891,13 +3259,12 @@
       cutAngleDeg,
       pocket,
       objectPath: verts,
-      objectEnd,
+      objectEnd: (verts && verts.length >= 2) ? verts[verts.length - 1] : objectEnd,
       reboundSegments,
       pathLengthMm: polylineLength(verts),
-      source: physics ? 'engine' : 'geometry',
+      source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
     };
 
-    // 用户已要求删除母球分离走位线，且击打目标球时不显示吃库反弹折线
     result.cuePost = null;
     return result;
   }
@@ -3768,7 +4135,34 @@
         }
       }
 
-      if ((CONFIG.showCueLine || CONFIG.showObjectLine) && !hasProjected) {
+      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线)
+      if (CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
+        const pxPts = pred.cuePostTrajectory.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
+        if (pxPts.length >= 2) {
+          hasProjected = true;
+          ctx.save();
+          ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || '#86cfff';
+          ctx.lineWidth = CONFIG.cuePostTrajectoryWidthPx || 1.6;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(pxPts[0].x, pxPts[0].y);
+          for (let i = 1; i < pxPts.length; i++) {
+            ctx.lineTo(pxPts[i].x, pxPts[i].y);
+            drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+          }
+          ctx.stroke();
+          ctx.restore();
+
+          // 终点绘制母球落位幽灵球圈
+          if (CONFIG.showGhostStopPosition && pred.cueRestPos) {
+            this.drawGhostBall(pred.cueRestPos, cueWorld);
+          }
+        }
+      }
+
+      if ((CONFIG.showCueLine || CONFIG.showObjectLine || CONFIG.showCuePostTrajectory) && !hasProjected) {
         return false;
       }
 
@@ -3782,22 +4176,30 @@
       if (CONFIG.showHudPill) {
         const effPower = Math.round(Number(pred.shot?.power ?? pred.power ?? 50));
         const tipText = formatTipEnglish(pred.tip || (pred.shot && pred.shot.tip));
+        const potWarning = pred.cuePottedWarning ? ' · ⚠️母球摔袋' : '';
 
-        if (t && t.pocket) {
+        if (pred.unreachable) {
+          this.drawTopHudPill(
+            `无法触碰目标球 (力度过小或被阻挡) · 力度 ${effPower}% · ${tipText}`,
+            '#ff5555'
+          );
+        } else if (t && t.pocket) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           const isUnderpowered = Boolean(pred.insufficientPower);
           const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
           const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
-          const hudRingColor = solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33');
+          const hudRingColor = pred.cuePottedWarning
+            ? '#ff4444'
+            : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
           this.drawTopHudPill(
-            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}`,
+            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
             hudRingColor
           );
         } else if (t && t.ball) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           this.drawTopHudPill(
-            `${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}`,
-            'rgba(255, 255, 255, 0.75)'
+            `${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
+            pred.cuePottedWarning ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
           );
         } else if (pred.noTargetEnd) {
           const methodLabel = (CONFIG.reboundMethod === 'worker' && pred.cuePost?.method === 'worker')
@@ -4180,6 +4582,7 @@
 
       row('目标球→袋口（绿色瞄准线）', 'showObjectLine');
       row('母球→目标球（白色瞄准线）', 'showCueLine');
+      row('物理引擎母球走位预测弧线', 'showCuePostTrajectory');
       row('母球吃库反弹折线', 'showCushionRebound');
 
       // 母球吃库折线计算途径切换 (途径1: 拦截数据 / 途径2: 算法无缝移植)
@@ -4704,6 +5107,8 @@
       const d = overlay.debug;
       const srcMap = {
         geometry: '几何预测',
+        engine: '原生Worker',
+        engineSim: '物理引擎微仿真',
       };
       const predSrc = pred && pred.target ? (srcMap[pred.target.source] || pred.target.source) : '-';
       let powerLine = '力度: -';
@@ -4712,7 +5117,8 @@
         powerLine = `力度: ${Math.round(s.power)}% (初速${Math.round(s.effSpeed)}mm/s)`;
       }
       const roomLine = (pred && pred.roomMode && pred.roomMode.label) ? `模式: ${pred.roomMode.label}\n` : '';
-      return `${roomLine}${powerLine}\n投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}`;
+      const engLine = `仿真: ${engineSim.status === 'ready' ? `就绪 (${engineSim.simMs}ms/${engineSim.frames}帧)` : (engineSim.status === 'loading' ? '加载中...' : '备轨/未启用')}\n`;
+      return `${roomLine}${powerLine}\n${engLine}投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}`;
     },
 
     updateDebug(pred, ready, customStatus) {
@@ -4991,6 +5397,9 @@
     pollCoreNamespace();
     loadToggles();
     ensureUiBuilt();
+    try {
+      engineSim.load();
+    } catch (_) {}
     startLoop();
 
     setInterval(() => {
@@ -5006,7 +5415,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.4.5',
+      version: '1.5.0',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
@@ -5029,6 +5438,7 @@
       snapToPerfectPot,
       togglePanelCircleVisibility,
       ui,
+      engineSim,
       detectCurrentRoomMode,
       extractRawState,
       readState,
