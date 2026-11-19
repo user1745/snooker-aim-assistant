@@ -1,0 +1,5 @@
+# 默认忽略下载目录下的所有其他个人文件与文件夹
+/*
+# 仅对斯诺克辅助脚本与 git 配置文件进行精确版本管理
+!/snooker-aim-assistant.js
+!/.gitignore

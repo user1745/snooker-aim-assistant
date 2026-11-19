@@ -1,0 +1,5049 @@
+// ==UserScript==
+// @name         斯诺克大师 · 高级瞄准与走位辅助线
+// @namespace    snooker-aim-assistant
+// @version      1.4.5
+// @description  在 147master.cn 整合原生V3物理引擎，提供瞄准延长线、母球高低杆走位预测弧线、吃库反弹线、CIT摩擦抛投修正、空格一键吸附对齐进球线、最佳出杆力度推荐
+// @author       assistant
+// @match        *://147master.cn/*
+// @match        *://*.147master.cn/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /* ================================================================== */
+  /* 单例保护：跨版本统一锁                                               */
+  /* ================================================================== */
+
+  const INSTANCE_KEY = '__snookerAimAssistantInstanceLock__';
+  try {
+    if (window[INSTANCE_KEY]) return;
+    window[INSTANCE_KEY] = true;
+  } catch (_) {}
+
+  /* ================================================================== */
+  /* 配置                                                                */
+  /* ================================================================== */
+
+  const CONFIG = {
+    cueLineColor: 'rgba(255, 255, 255, 0.95)',
+    cueLineWidthPx: 1.5,
+    objectLineColor: '#00ff88',
+    objectLineWidthPx: 1.6,
+    // 进袋判定颜色 (用于信息浮标指示)：稳进高置信为绿色 #00ff88，临界/薄球/低置信为橙色 #ff8c33
+    pocketRingColor: '#00ff88',
+    pocketEdgeColor: '#ff8c33',
+
+    // 白色假想球样式 (复刻游戏原始实心白色圆周线圈包裹 + 半透明白填充)
+    ghostBallColor: 'rgba(255, 255, 255, 0.35)',
+    ghostBallStrokeColor: '#ffffff',
+    ghostBallStrokeWidthPx: 1.1,
+
+    // 【母球吃库反弹折线】：天蓝色 #86cfff 实线，粗细 1.6px (与绿色瞄准线一致)
+    showCushionRebound: true,
+    reboundMethod: 'worker',           // 'worker' (途径1: 拦截Worker数据) | 'algo' (途径2: 算法无缝移植)
+    cueCushionReboundColor: '#86cfff', // 游戏原生新手天蓝色反弹线 #86cfff
+    cueCushionReboundWidthPx: 1.6,     // 与绿色瞄准线 1.6px 完全一致
+    showObjectRebound: true,           // 目标球吃库反弹折线
+    maxRebounds: 1,
+    ghostCueBallColor: 'rgba(134, 207, 255, 0.35)',
+
+    // 默认开启，无需在控制面板中展示
+    flatOnCloth: true,
+    checkBlock: true,
+
+    // 功能开关默认值
+    showObjectLine: true,
+    showCueLine: true,
+    doubleClickAlign: true,
+    showHudPill: true,
+    showDebug: false,
+
+    // 物理常数（完全对齐 147master 原生 V3 物理引擎）
+    maxCuePowerMmS: 7000,
+    canonicalSimSpeedMmS: 3400,
+    maxTipOffsetRatio: 0.5,
+    maxTipSpeedRetention: 0.95,
+    cueSpinEfficiency: 0.70,
+    tipDeadzone: 0.02,
+    clothSlidingMu: 0.18,
+    clothRollingDecelMmS2: 110,
+    clothSideSpinDecelRadS2: 16,
+    railRestitution: 0.98,
+    cushionContactFrictionMu: 0.18,
+    jawRestitution: 0.84,
+    ballRestitution: 0.95,
+    throwFrictionCoef: 0.038,
+
+    // 物理有效球心边界 (台面 3568.7 x 1778.0 扣除球半径 26.25)
+    railBoundX: 1758.1,
+    railBoundY: 862.75,
+    maxRebounds: 1,
+
+    calibrationKey: 'snooker-aim-assistant-homography-v1',
+    panelPosKey: 'snooker-aim-assistant-panel-pos-v1',
+    togglesKey: 'snooker-aim-assistant-toggles-v1',
+    panelCollapseKey: 'snooker-aim-assistant-collapse-v1',
+    panelCircleHiddenKey: 'snooker-aim-assistant-circle-hidden-v1',
+  };
+
+  /* ================================================================== */
+  /* 命名常量                                                            */
+  /* ================================================================== */
+
+  const BALL_RADIUS_MM = 26.25;
+  const COLLISION_DIST_MM = BALL_RADIUS_MM * 2;
+  const THROAT_WIDTH_MM = 84;
+
+  const POCKET_SOLID_THRESHOLD = 0.5;
+  const DEFAULT_CAPTURE_RADIUS = 67.241377;
+
+  /* ================================================================== */
+  /* 开关状态持久化                                                       */
+  /* ================================================================== */
+
+  const TOGGLE_KEYS = [
+    'showObjectLine',
+    'showCueLine',
+    'showCushionRebound',
+    'doubleClickAlign',
+    'showHudPill',
+    'showDebug',
+  ];
+  let _configVersion = 0;
+  let _storageListenerInstalled = false;
+
+  function loadToggles() {
+    try {
+      const raw = localStorage.getItem(CONFIG.togglesKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      for (const key of TOGGLE_KEYS) {
+        if (typeof saved[key] === 'boolean' && CONFIG[key] !== saved[key]) {
+          CONFIG[key] = saved[key];
+          _configVersion++;
+        }
+      }
+      if (typeof saved.reboundMethod === 'string' && (saved.reboundMethod === 'worker' || saved.reboundMethod === 'algo')) {
+        CONFIG.reboundMethod = saved.reboundMethod;
+      }
+    } catch (_) {}
+    if (!_storageListenerInstalled && typeof window !== 'undefined') {
+      _storageListenerInstalled = true;
+      window.addEventListener('storage', (e) => {
+        if (e && e.key === CONFIG.togglesKey) loadToggles();
+      });
+    }
+  }
+
+  function saveToggles() {
+    try {
+      const obj = {};
+      for (const key of TOGGLE_KEYS) obj[key] = CONFIG[key];
+      obj.reboundMethod = CONFIG.reboundMethod;
+      localStorage.setItem(CONFIG.togglesKey, JSON.stringify(obj));
+    } catch (_) {}
+    _configVersion++;
+    _lastRenderKey = null;
+    _forceShowUntil = performance.now() + 1200;
+    if (typeof mobileDock !== 'undefined' && mobileDock.ensure) mobileDock.ensure();
+  }
+
+  loadToggles();
+
+  /* ================================================================== */
+  /* 入射角标定曲线                                                      */
+  /* ================================================================== */
+
+  const INCIDENCE_CURVES = {
+    middle: [[0, 67.3, 1.0], [15, 68.3, 1.0], [30, 66.0, 0.98], [45, 50.6, 0.75], [50, 43.9, 0.65], [55, 36.6, 0.54], [60, 29.2, 0.43], [65, 21.0, 0.31], [70, 12.4, 0.18], [75, 0, 0]],
+    corner: [[0, 49.9, 1.0], [10, 47.3, 0.95], [15, 44.8, 0.90], [20, 40.6, 0.81], [25, 35.7, 0.72], [30, 30.7, 0.62], [35, 22.1, 0.44], [40, 14.4, 0.29], [45, 5.7, 0.11], [46, 0, 0]],
+  };
+
+  function incidenceAt(type, angleDeg) {
+    const curve = INCIDENCE_CURVES[type] || INCIDENCE_CURVES.corner;
+    const a = Math.min(Math.abs(angleDeg), curve[curve.length - 1][0]);
+    for (let i = 0; i < curve.length - 1; i++) {
+      const [a0, w0, c0] = curve[i], [a1, w1, c1] = curve[i + 1];
+      if (a >= a0 && a <= a1) {
+        const k = a1 === a0 ? 0 : (a - a0) / (a1 - a0);
+        return { widthMm: w0 + (w1 - w0) * k, coef: Math.min(1, c0 + (c1 - c0) * k) };
+      }
+    }
+    const last = curve[curve.length - 1];
+    return { widthMm: last[1], coef: Math.min(1, last[2]) };
+  }
+
+  const FALLBACK_POCKETS = [
+    { id: 'middle-top', label: '上中袋', type: 'middle', center: { x: 0, y: -957.090867 }, opening: { x: 0, y: -889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: -1 } },
+    { id: 'corner-top-right', label: '右上袋', type: 'corner', center: { x: 1814.830006, y: -918.190443 }, opening: { x: 1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: -0.707107 } },
+    { id: 'corner-bottom-right', label: '右下袋', type: 'corner', center: { x: 1814.830006, y: 918.190443 }, opening: { x: 1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: 0.707107 } },
+    { id: 'middle-bottom', label: '下中袋', type: 'middle', center: { x: 0, y: 957.090867 }, opening: { x: 0, y: 889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: 1 } },
+    { id: 'corner-bottom-left', label: '左下袋', type: 'corner', center: { x: -1814.830006, y: 918.190443 }, opening: { x: -1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: 0.707107 } },
+    { id: 'corner-top-left', label: '左上袋', type: 'corner', center: { x: -1814.830006, y: -918.190443 }, opening: { x: -1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: -0.707107 } },
+  ];
+
+  /* ================================================================== */
+  /* 通用向量与几何工具                                                  */
+  /* ================================================================== */
+
+  const V = {
+    len: (p) => Math.hypot(p.x, p.y),
+    lenSq: (p) => p.x * p.x + p.y * p.y,
+    norm: (p) => {
+      const l = Math.hypot(p.x, p.y);
+      return l > 1e-9 ? { x: p.x / l, y: p.y / l } : { x: 0, y: 0 };
+    },
+    sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y }),
+    add: (a, b) => ({ x: a.x + b.x, y: a.y + b.y }),
+    scale: (a, s) => ({ x: a.x * s, y: a.y * s }),
+    dot: (a, b) => a.x * b.x + a.y * b.y,
+    dist: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+    rotate: (p, rad) => {
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
+      return { x: p.x * c - p.y * s, y: p.x * s + p.y * c };
+    },
+  };
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  function distToSegment(p, a, b) {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const len2 = abx * abx + aby * aby;
+    if (len2 <= 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
+    const t = clamp(((p.x - a.x) * abx + (p.y - a.y) * aby) / len2, 0, 1);
+    return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+  }
+
+  function safeGet(fn, fallback) {
+    try {
+      return fn();
+    } catch (err) {
+      devLog('warn', 'safeGet 捕获异常:', err);
+      return fallback;
+    }
+  }
+
+  function devLog(level, ...args) {
+    if (CONFIG.showDebug) {
+      (console[level] || console.log).call(console, '[aim-assistant]', ...args);
+    }
+  }
+
+  function polylineLength(pts) {
+    if (!Array.isArray(pts) || pts.length < 2) return 0;
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) total += V.dist(pts[i - 1], pts[i]);
+    return total;
+  }
+
+  function readTableBounds(state) {
+    let boundX = CONFIG.railBoundX;
+    let boundY = CONFIG.railBoundY;
+    const tcs = state && state.tableColliderSet;
+    if (tcs && typeof tcs === 'object') {
+      const b = tcs.bounds || tcs.tableBounds || tcs.playfieldBounds;
+      if (b && typeof b === 'object') {
+        const rawX = Number(b.maxX ?? b.halfWidth ?? b.x);
+        const rawY = Number(b.maxY ?? b.halfHeight ?? b.y);
+        if (Number.isFinite(rawX) && rawX > 1000) {
+          boundX = rawX > 1770 ? rawX - BALL_RADIUS_MM : rawX;
+        }
+        if (Number.isFinite(rawY) && rawY > 500) {
+          boundY = rawY > 875 ? rawY - BALL_RADIUS_MM : rawY;
+        }
+      }
+    }
+    return {
+      boundX,
+      boundY,
+      cushionX: boundX + BALL_RADIUS_MM,
+      cushionY: boundY + BALL_RADIUS_MM,
+    };
+  }
+
+  function rayRailHit(origin, dir, cushionX = CONFIG.railBoundX, cushionY = CONFIG.railBoundY, pockets = null) {
+    const d = V.norm(dir);
+    if (V.len(d) < 1e-6) return null;
+
+    const margin = 0.8;
+    const ox = clamp(origin.x, -cushionX + margin, cushionX - margin);
+    const oy = clamp(origin.y, -cushionY + margin, cushionY - margin);
+    const safeOrigin = { x: ox, y: oy };
+
+    let best = null;
+    const consider = (t, axis) => {
+      if (!Number.isFinite(t) || t <= 1e-3) return;
+      if (!best || t < best.t) {
+        best = {
+          t,
+          axis,
+          normal: axis === 'x' ? { x: d.x > 0 ? -1 : 1, y: 0 } : { x: 0, y: d.y > 0 ? -1 : 1 },
+          point: { x: ox + d.x * t, y: oy + d.y * t },
+        };
+      }
+    };
+
+    if (d.x > 1e-6) consider((cushionX - ox) / d.x, 'x');
+    else if (d.x < -1e-6) consider((-cushionX - ox) / d.x, 'x');
+
+    if (d.y > 1e-6) consider((cushionY - oy) / d.y, 'y');
+    else if (d.y < -1e-6) consider((-cushionY - oy) / d.y, 'y');
+
+    if (best && Array.isArray(pockets)) {
+      for (const pk of pockets) {
+        if (!pk || !pk.opening || !pk.normal || !pk.tangent) continue;
+        const toward = V.dot(d, pk.normal);
+        if (toward <= 0.1) continue;
+        const depth = V.dot(V.sub(pk.opening, safeOrigin), pk.normal);
+        if (depth <= 0) continue;
+        const s = depth / toward;
+        if (s <= best.t || s - best.t > 140) continue;
+        const arrive = V.add(safeOrigin, V.scale(d, s));
+        const tan = Math.abs(V.dot(V.sub(arrive, pk.opening), pk.tangent));
+        const jawHalf = (pk.throatWidthMm || THROAT_WIDTH_MM) * 0.5;
+        if (tan <= jawHalf) {
+          return {
+            t: s,
+            axis: 'jaw',
+            point: arrive,
+          };
+        }
+      }
+    }
+
+    return best;
+  }
+
+  function rayFirstBall(origin, dir, balls, ignoreIds) {
+    const d = V.norm(dir);
+    if (V.len(d) < 1e-6) return null;
+    let best = null;
+    for (const ball of balls) {
+      if (!ball || ball.potted || !ball.pos) continue;
+      if (ignoreIds && ignoreIds.has(ball.id)) continue;
+      const rc = rayContact(origin, d, ball);
+      if (rc && (!best || rc.tHit < best.tHit)) {
+        best = { ball, ...rc };
+      }
+    }
+    return best;
+  }
+
+  /* ================================================================== */
+  /* 跨窗口 / 子 iframe 穿透枚举工具                                     */
+  /* ================================================================== */
+
+  function collectCandidateWindows() {
+    const list = [];
+    const seen = new Set();
+    const pushWin = (w) => {
+      if (!w || seen.has(w)) return;
+      seen.add(w);
+      list.push(w);
+    };
+
+    try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) pushWin(unsafeWindow); } catch (_) {}
+    pushWin(window);
+
+    if (window === window.top) {
+      const walkFrames = (win, depth) => {
+        if (!win || depth > 4) return;
+        let frames = null;
+        try { frames = win.frames; } catch (_) { return; }
+        if (!frames || typeof frames.length !== 'number') return;
+        for (let i = 0; i < frames.length; i++) {
+          const child = frames[i];
+          try {
+            if (child && child.document) {
+              pushWin(child);
+              walkFrames(child, depth + 1);
+            }
+          } catch (_) {}
+        }
+      };
+      walkFrames(window, 0);
+    }
+
+    return list;
+  }
+
+  /* ================================================================== */
+  /* 【途径 1】 原生 Web Worker 拦截与动力学折线同步桥梁                   */
+  /* ================================================================== */
+
+  const _hookedWorkers = new WeakSet();
+
+  const NativeWorkerBridge = {
+    activeWorker: null,
+    latestRebound: null,
+    latestAim: null,
+    lastReboundTime: 0,
+    lastAimTime: 0,
+
+    initWindow(win) {
+      if (!win) return;
+      try {
+        const OriginalWorker = win.Worker;
+        if (!OriginalWorker || OriginalWorker.__snookerHooked) return;
+
+        function SnookerHookedWorker(scriptURL, options) {
+          const worker = new OriginalWorker(scriptURL, options);
+          try {
+            NativeWorkerBridge.trackWorker(worker, scriptURL);
+          } catch (_) {}
+          return worker;
+        }
+
+        SnookerHookedWorker.prototype = OriginalWorker.prototype;
+        SnookerHookedWorker.__snookerHooked = true;
+        win.Worker = SnookerHookedWorker;
+      } catch (_) {}
+    },
+
+    trackWorker(worker, scriptURL) {
+      if (!worker || _hookedWorkers.has(worker)) return;
+      _hookedWorkers.add(worker);
+      const urlStr = String(scriptURL || '');
+      if (urlStr.includes('aim-worker') || urlStr.includes('worker') || !NativeWorkerBridge.activeWorker) {
+        NativeWorkerBridge.activeWorker = worker;
+      }
+
+      worker.addEventListener('message', (ev) => {
+        try {
+          const data = ev && ev.data;
+          if (!data) return;
+          if (data.result) {
+            const res = data.result;
+            const now = performance.now();
+            if (res.kind === 'rebound') {
+              NativeWorkerBridge.latestRebound = res;
+              NativeWorkerBridge.lastReboundTime = now;
+            } else if (Array.isArray(res.targetPath) || Array.isArray(res.cuePath)) {
+              NativeWorkerBridge.latestAim = res;
+              NativeWorkerBridge.lastAimTime = now;
+            }
+          }
+        } catch (_) {}
+      });
+    },
+
+    enableReboundInCore(core) {
+      if (!core) return;
+      try {
+        if (typeof core.getConfig === 'function') {
+          const cfg = core.getConfig();
+          if (cfg && cfg.aim && cfg.aim.values) {
+            cfg.aim.values.reboundEnabled = true;
+            cfg.aim.values.cueBallReboundEnabled = true;
+          }
+        }
+        if (typeof core.updateTuning === 'function') {
+          core.updateTuning({
+            aim: { reboundEnabled: true, cueBallReboundEnabled: true }
+          });
+        }
+      } catch (_) {}
+    }
+  };
+
+  // 脚本启动立即注入顶级窗口
+  NativeWorkerBridge.initWindow(window);
+  try {
+    if (typeof unsafeWindow !== 'undefined' && unsafeWindow) {
+      NativeWorkerBridge.initWindow(unsafeWindow);
+    }
+  } catch (_) {}
+
+  /* ================================================================== */
+  /* 大厅主界面、结算弹窗、加载过渡与房间模式检测 (练球/好友/排名/大厅)  */
+  /* ================================================================== */
+
+  const LOBBY_MENU_PATTERNS = [
+    '练球房',
+    '好友对战',
+    '排名赛',
+    '排位赛',
+    '每日签到',
+    '每日挑战',
+    '创建房间',
+    '加入房间',
+    '对战大厅',
+    '返回大厅',
+    '退出房间',
+    '快速开始',
+    '匹配中',
+  ];
+
+  const SETTLEMENT_PATTERNS = [
+    '再来一局', '重新开始', '再玩一次', '再试一次', '重玩',
+    '战绩结算', '本局结算', '对局结算', '比赛结束', '对局结束', '本局结束',
+    '胜负已分', '单杆最高', '总得分', '本局得分', '我的得分', '对手得分',
+    '退出对局', '下一局', '对局结果', '比赛结果',
+    '恭喜获胜', '获得胜利', '练习完成', '清台结算'
+  ];
+
+  const LOADING_PATTERNS = [
+    '加载中',
+    '正在加载',
+    '正在进入',
+    '准备进入',
+    '资源加载',
+    '匹配成功',
+    '正在连接',
+    '载入中',
+    'loading',
+  ];
+
+  let _lobbyCheckCache = false;
+  let _lobbyCheckTime = 0;
+  let _settleCheckCache = false;
+  let _settleCheckTime = 0;
+  let _loadingCheckCache = false;
+  let _loadingCheckTime = 0;
+
+  function hasVisibleLobbyUiInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    const win = doc.defaultView || window;
+    const nodes = doc.querySelectorAll('button, a, div, span, p');
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.children && el.children.length > 3) continue;
+      const txt = (el.textContent || '').trim();
+      if (!txt || txt.length > 25) continue;
+      if (!LOBBY_MENU_PATTERNS.some((pat) => txt.includes(pat))) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 12 || rect.height < 10) continue;
+      try {
+        const st = win.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.05) continue;
+      } catch (_) {}
+      return true;
+    }
+    return false;
+  }
+
+  function isDarkMaskColor(bgStr) {
+    if (!bgStr || bgStr === 'transparent') return false;
+    const m = bgStr.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+    if (!m) {
+      const hex = bgStr.trim().toLowerCase();
+      return hex === '#000' || hex === '#000000' || hex === '#111' || hex === '#111111' || hex === '#1a1a1a';
+    }
+    const r = parseInt(m[1], 10);
+    const g = parseInt(m[2], 10);
+    const b = parseInt(m[3], 10);
+    const a = m[4] != null ? parseFloat(m[4]) : 1.0;
+    // 关键：必须具备实质的深色遮罩不透明度 (alpha >= 0.25 且 r,g,b <= 65)
+    // 游戏页面中的透明层 (alpha=0 或 transparent) 绝对不是遮罩！
+    return a >= 0.25 && r <= 65 && g <= 65 && b <= 65;
+  }
+
+  // 深度扫描检测全屏黑色/半透明深色蒙层与弹窗遮罩 (Black Modal / Mask Backdrop)
+  function hasVisibleDarkMaskInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    const win = doc.defaultView || window;
+    const winW = win.innerWidth || doc.documentElement.clientWidth || 800;
+    const winH = win.innerHeight || doc.documentElement.clientHeight || 600;
+
+    try {
+      const candidateSelectors = [
+        '[class*="mask"]', '[class*="backdrop"]', '[class*="dimmer"]',
+        '[class*="modal-bg"]', '[class*="dialog-bg"]', '[id*="mask"]', '[id*="backdrop"]',
+        'div, section'
+      ].join(', ');
+
+      const elements = doc.querySelectorAll(candidateSelectors);
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        if (el.id === 'snooker-aim-panel' || el.id === 'snooker-aim-overlay') continue;
+        if (el.closest && el.closest('#snooker-aim-panel')) continue;
+
+        const rect = el.getBoundingClientRect();
+        // 必须覆盖大面积屏幕 (至少 45% 宽高)
+        if (rect.width < winW * 0.45 || rect.height < winH * 0.45) continue;
+
+        const st = win.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.1) continue;
+        if (st.position !== 'fixed' && st.position !== 'absolute') continue;
+
+        // 【最核心判定】：计算出的背景色必须是真正的深色/黑色遮罩，透明层绝对排除！
+        if (!isDarkMaskColor(st.backgroundColor)) continue;
+
+        const z = parseInt(st.zIndex, 10);
+        if (Number.isFinite(z) && z < 2) continue; // 必须浮于底层游戏画面之上
+
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function hasVisibleSettlementUiInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    // 1. 【绝对优先】真实黑色全屏遮罩检测
+    if (hasVisibleDarkMaskInDoc(doc)) return true;
+
+    const win = doc.defaultView || window;
+    // 2. 检查类名或 ID 明确为结算模态框且尺寸足够大的容器 (至少 140x90px)
+    const modalNodes = doc.querySelectorAll('[class*="settlement"], [class*="game-over"], [class*="gameover"], [id*="settlement"], [id*="gameover"]');
+    for (let i = 0; i < modalNodes.length; i++) {
+      const el = modalNodes[i];
+      if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 140 && rect.height > 90) {
+        try {
+          const st = win.getComputedStyle(el);
+          if (st.display !== 'none' && st.visibility !== 'hidden' && parseFloat(st.opacity) > 0.1) {
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 3. 检查按钮与文本节点是否包含明确的结算关键词
+    const nodes = doc.querySelectorAll('button, a, div, span, p, h1, h2, h3, h4');
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.children && el.children.length > 3) continue;
+      const txt = (el.textContent || '').trim();
+      if (!txt || txt.length > 25) continue;
+      if (!SETTLEMENT_PATTERNS.some((pat) => txt.includes(pat))) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 15 || rect.height < 10) continue;
+      try {
+        const st = win.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.1) continue;
+      } catch (_) {}
+      return true;
+    }
+    return false;
+  }
+
+  function hasVisibleLoadingUiInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    const win = doc.defaultView || window;
+    const loadContainers = doc.querySelectorAll('[class*="loading"], [class*="load-mask"], [class*="preloader"], [id*="loading"], [id*="preloader"]');
+    for (let i = 0; i < loadContainers.length; i++) {
+      const el = loadContainers[i];
+      if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 50 && rect.height > 50) {
+        try {
+          const st = win.getComputedStyle(el);
+          if (st.display !== 'none' && st.visibility !== 'hidden' && parseFloat(st.opacity) > 0.1) {
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
+    const nodes = doc.querySelectorAll('div, span, p, h1, h2, h3, h4');
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.children && el.children.length > 2) continue;
+      const txt = (el.textContent || '').trim().toLowerCase();
+      if (!txt || txt.length > 25) continue;
+      if (!LOADING_PATTERNS.some((pat) => txt.includes(pat))) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 15 || rect.height < 10) continue;
+      try {
+        const st = win.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.1) continue;
+      } catch (_) {}
+      return true;
+    }
+    return false;
+  }
+
+  function isPlayableTableState(state) {
+    if (!state || !Array.isArray(state.balls) || state.balls.length === 0) return false;
+    const hasCue = state.balls.some((b) => b && !b.potted && (b.kind === 'cue' || b.id === state.cueBallId));
+    const activeObjs = activeObjectBalls(state);
+    const hasAim = Boolean(state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x));
+    const notOver = !(state.isOver || state.gameOver || state.frameOver || state.isSettlement || state.isFinished || state.finished);
+    return hasCue && hasAim && activeObjs.length > 0 && notOver;
+  }
+
+  function isSettlementOrGameOverScreen(state) {
+    // 0. 优先保障：如果当前是明确的可玩台面状态（有母球、有目标球、且有瞄准线），绝不误判为结算！
+    if (isPlayableTableState(state)) {
+      _frameOrMatchOver = false;
+      return false;
+    }
+
+    // 1. 状态变量标记检测
+    if (state) {
+      if (state.isOver || state.gameOver || state.frameOver || state.isSettlement || state.isFinished || state.finished) return true;
+      const statusLow = String(state.status || state.state || state.phase || '').toLowerCase();
+      if (statusLow.includes('gameover') || statusLow.includes('finish') || statusLow.includes('settle') || statusLow.includes('end')) return true;
+      if (state.ruleState && (state.ruleState.isOver || state.ruleState.gameOver || state.ruleState.frameOver)) return true;
+      const activeObjs = activeObjectBalls(state);
+      if (activeObjs.length === 0 && (!state.balls || state.balls.length > 0)) {
+        return true;
+      }
+    }
+
+    // 2. 全局多窗口 DOM 穿透检测 (黑色弹窗遮罩 + 语义词)
+    const now = performance.now();
+    if (now - _settleCheckTime > 150) {
+      _settleCheckTime = now;
+      let detected = false;
+      const wins = collectCandidateWindows();
+      for (const win of wins) {
+        try {
+          if (win.document && hasVisibleSettlementUiInDoc(win.document)) {
+            detected = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      _settleCheckCache = detected;
+    }
+
+    if (_settleCheckCache) return true;
+
+    // 若 DOM 未检测到弹窗，自动解除引擎可能滞留的结束锁定
+    if (_frameOrMatchOver) {
+      if (!_settleCheckCache) {
+        _frameOrMatchOver = false;
+      } else {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isLoadingScreen(state) {
+    if (state && (state.isLoading || state.loading || state.isConnecting)) return true;
+    const now = performance.now();
+    if (now - _loadingCheckTime > 150) {
+      _loadingCheckTime = now;
+      let detected = false;
+      const wins = collectCandidateWindows();
+      for (const win of wins) {
+        try {
+          if (win.document && hasVisibleLoadingUiInDoc(win.document)) {
+            detected = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      _loadingCheckCache = detected;
+    }
+    return _loadingCheckCache;
+  }
+
+  function isLobbyMenuVisible() {
+    const now = performance.now();
+    if (now - _lobbyCheckTime > 150) {
+      _lobbyCheckTime = now;
+      let detected = false;
+      const wins = collectCandidateWindows();
+      for (const win of wins) {
+        try {
+          if (win.document && hasVisibleLobbyUiInDoc(win.document)) {
+            detected = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      _lobbyCheckCache = detected;
+    }
+    return _lobbyCheckCache;
+  }
+
+  function isLobbyOrNonTableScreen(state) {
+    // 0. 可玩台面状态具有最高通行权
+    if (isPlayableTableState(state)) {
+      _frameOrMatchOver = false;
+      return false;
+    }
+
+    // 1. 检查大厅主菜单
+    if (isLobbyMenuVisible()) {
+      if (overlay && overlay.canvas) overlay.clear();
+      return true;
+    }
+
+    // 2. 检查结算弹窗与加载过渡
+    if (isSettlementOrGameOverScreen(state) || isLoadingScreen(state)) {
+      if (overlay && overlay.canvas) overlay.clear();
+      return true;
+    }
+
+    // 3. 状态变量标记检测
+    if (state) {
+      if (state.isLobby === true || state.inLobby === true) return true;
+      const statusLow = String(state.status || state.state || state.phase || '').toLowerCase();
+      if (statusLow.includes('lobby') || statusLow.includes('menu') || statusLow.includes('home')) return true;
+    }
+
+    return false;
+  }
+
+
+
+  function detectCurrentRoomMode(state) {
+    if (!state || isLobbyOrNonTableScreen(state)) {
+      if (isSettlementOrGameOverScreen(state)) {
+        return { mode: 'settlement', label: '对局结算' };
+      }
+      if (isLoadingScreen(state)) {
+        return { mode: 'loading', label: '加载中' };
+      }
+      return { mode: 'lobby', label: '大厅待机' };
+    }
+    const sp = getGameGlobal('SnookerProduct');
+
+    // 1. 练球房检测
+    if (
+      (sp && sp.practice) ||
+      (state.practiceAutoColorTarget) ||
+      (state.ruleSettings && state.ruleSettings.practiceAutoColorTarget) ||
+      (sp && (sp.currentMode === 'practice' || sp.mode === 'practice')) ||
+      (state.mode === 'practice' || state.gameMode === 'practice')
+    ) {
+      return { mode: 'practice', label: '练球房' };
+    }
+
+    // 2. 排名赛检测
+    if (
+      (sp && (sp.rank || sp.ranked || sp.ladder)) ||
+      (sp && (sp.currentMode === 'rank' || sp.mode === 'rank' || sp.matchType === 'rank')) ||
+      (state.matchType === 'rank' || state.gameMode === 'rank')
+    ) {
+      return { mode: 'ranked', label: '排名赛' };
+    }
+
+    // 3. 好友对战检测
+    if (
+      (sp && (sp.room || sp.customRoom || sp.friendMatch || sp.matchInfo)) ||
+      (state.roomType === 'friend' || state.isFriendMatch || state.mode === 'friend')
+    ) {
+      return { mode: 'friend', label: '好友对战' };
+    }
+
+    return { mode: 'match', label: '对局中' };
+  }
+
+  function isCanvasActuallyVisible(canvas) {
+    if (!canvas || !canvas.isConnected) return false;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 15 || rect.height <= 15) return false;
+    const doc = canvas.ownerDocument;
+    const win = doc && doc.defaultView;
+    if (win) {
+      try {
+        const st = win.getComputedStyle(canvas);
+        if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.02) {
+          return false;
+        }
+      } catch (_) {}
+      try {
+        const frameEl = win.frameElement;
+        if (frameEl) {
+          if (!frameEl.isConnected) return false;
+          const parentWin = frameEl.ownerDocument && frameEl.ownerDocument.defaultView;
+          if (parentWin) {
+            const fst = parentWin.getComputedStyle(frameEl);
+            if (fst.display === 'none' || fst.visibility === 'hidden' || parseFloat(fst.opacity) < 0.02) {
+              return false;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return true;
+  }
+
+  /* ================================================================== */
+  /* Toast 非阻塞通知                                                   */
+  /* ================================================================== */
+
+  function showToast(msg, duration) {
+    const ms = duration || 3000;
+    const hostDoc = (window.top && (() => { try { return window.top.document; } catch (_) { return null; } })()) || document;
+    if (!hostDoc || !hostDoc.body) return;
+    const toast = hostDoc.createElement('div');
+    toast.style.cssText = [
+      'position:fixed;left:50%;bottom:50px;transform:translateX(-50%);',
+      'z-index:2147483648;background:rgba(10,18,12,0.92);color:#f0f4ee;',
+      'height:20px;line-height:20px;padding:0 10px;border-radius:10px;',
+      'font:600 10px/20px -apple-system,"PingFang SC",sans-serif;',
+      'box-shadow:0 3px 12px rgba(0,0,0,0.5);border:1px solid rgba(0,255,136,0.4);',
+      'pointer-events:none;transition:opacity 0.3s;white-space:nowrap;',
+      'display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;',
+    ].join('');
+    toast.textContent = msg;
+    hostDoc.body.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      setTimeout(() => toast.remove(), 300);
+    }, ms);
+  }
+
+  /* ================================================================== */
+  /* 力度与杆法描述                                                      */
+  /* ================================================================== */
+
+  function resolveCueSpeed(power, maxCuePower) {
+    const p = clamp(Number(power) || 0, 0, 100);
+    const max = Math.max(1, Number(maxCuePower) || CONFIG.maxCuePowerMmS);
+    return p === 0 ? 0 : max * (p / 100);
+  }
+
+  function resolveV3ElevationRetention(elevation = 2.5) {
+    const angle = Number.isFinite(Number(elevation)) ? Number(elevation) : 2.5;
+    const t = Math.max(0, Math.min(1, (angle - 2.5) / 17.5));
+    return 1 - 0.15 * t * t * (3 - 2 * t);
+  }
+
+  function tipSpeedRetention(tip) {
+    const maxOff = Math.max(1e-6, CONFIG.maxTipOffsetRatio);
+    const mag = Math.hypot(Number(tip && tip.x) || 0, Number(tip && tip.y) || 0);
+    const norm = Math.min(1, mag / maxOff);
+    return 1 - (1 - CONFIG.maxTipSpeedRetention) * norm * norm;
+  }
+
+  function tipDescriptor(tip) {
+    const x = Number(tip && tip.x) || 0;
+    const y = Number(tip && tip.y) || 0;
+    const dz = CONFIG.tipDeadzone;
+    const parts = [];
+    if (Math.abs(x) >= dz) parts.push((x > 0 ? '右塞' : '左塞') + Math.round(Math.abs(x) / CONFIG.maxTipOffsetRatio * 100) + '%');
+    if (Math.abs(y) >= dz) parts.push((y > 0 ? '高杆' : '低杆') + Math.round(Math.abs(y) / CONFIG.maxTipOffsetRatio * 100) + '%');
+    return {
+      x, y,
+      norm: Math.min(1, Math.hypot(x, y) / CONFIG.maxTipOffsetRatio),
+      hasSpin: parts.length > 0,
+      label: parts.length ? parts.join('+') : '中杆无塞',
+    };
+  }
+
+  function formatTipEnglish(tip) {
+    if (!tip) return '中杆';
+    const sx = Number(tip.x) || 0;
+    const sy = Number(tip.y) || 0;
+    const yText = sy > 0.08 ? '高杆' : (sy < -0.08 ? '低杆' : '');
+    const xText = sx > 0.08 ? '右塞' : (sx < -0.08 ? '左塞' : '');
+    if (!yText && !xText) return '中杆';
+    if (!yText) return `中杆${xText}`;
+    return `${yText}${xText}`;
+  }
+
+  function resolveEffectiveTip(state) {
+    if (!state) return { x: 0, y: 0 };
+    const cand = (state.aim && state.aim.tipOffset) ||
+      (state.shot && state.shot.tipOffset) ||
+      state.tipOffset ||
+      (state.aim && state.aim.spin) ||
+      (state.shot && state.shot.spin) ||
+      state.spin ||
+      (state.cue && state.cue.tipOffset);
+    if (cand && (Number.isFinite(cand.x) || Number.isFinite(cand.y))) {
+      return {
+        x: clamp(Number(cand.x) || 0, -1, 1),
+        y: clamp(Number(cand.y) || 0, -1, 1),
+      };
+    }
+    return { x: 0, y: 0 };
+  }
+
+  function resolveEffectivePower(state) {
+    if (!state) return 50;
+    if (state.aim && Number.isFinite(Number(state.aim.power)) && Number(state.aim.power) > 0) {
+      return clamp(Number(state.aim.power), 2, 100);
+    }
+    if (state.shot && Number.isFinite(Number(state.shot.power)) && Number(state.shot.power) > 0) {
+      return clamp(Number(state.shot.power), 2, 100);
+    }
+    if (state.cue && Number.isFinite(Number(state.cue.power)) && Number(state.cue.power) > 0) {
+      return clamp(Number(state.cue.power), 2, 100);
+    }
+    if (Number.isFinite(Number(state.power)) && Number(state.power) > 0) {
+      return clamp(Number(state.power), 2, 100);
+    }
+    return 50;
+  }
+
+  /* ================================================================== */
+  /* 击球与运动状态检测                                                  */
+  /* ================================================================== */
+
+  let _lastCuePos = null;
+  let _cueMoveCount = 0;
+  let _shotHiddenSince = 0;
+  let _forceShowUntil = 0;
+  let _wasInShot = false;
+  let _postShotSettleUntil = 0;
+
+  function hasBallVelocity(state) {
+    if (!state || !Array.isArray(state.balls)) return false;
+    for (const b of state.balls) {
+      if (!b || b.potted) continue;
+      const v = b.vel || b.velocity || b.v;
+      if (v && typeof v === 'object') {
+        const vx = Number(v.x) || 0;
+        const vy = Number(v.y) || 0;
+        const vz = Number(v.z) || 0;
+        // 速度阈值设为 12 mm/s (平方 144)，排除物理引擎浮点静态微漂移，精确捕获真实击球
+        if ((vx * vx + vy * vy + vz * vz) > 144) return true;
+      }
+    }
+    return false;
+  }
+
+  let _lastBallPositions = new Map();
+  let _ballsStillSince = 0;
+
+  function ballsActuallyStill(state) {
+    if (!state || !Array.isArray(state.balls)) return false;
+    let moved = false;
+    let count = 0;
+    state.balls.forEach((b, i) => {
+      if (!b || b.potted || !b.pos || !Number.isFinite(b.pos.x)) return;
+      const key = b.id != null ? String(b.id) : `${b.kind || 'ball'}:${i}`;
+      const prev = _lastBallPositions.get(key);
+      if (prev && V.dist(prev, b.pos) > 0.4) moved = true;
+      _lastBallPositions.set(key, { x: b.pos.x, y: b.pos.y });
+      count++;
+    });
+    if (!count) return false;
+    if (moved) {
+      _ballsStillSince = performance.now();
+      return false;
+    }
+    if (!_ballsStillSince) _ballsStillSince = performance.now();
+    return performance.now() - _ballsStillSince > 500;
+  }
+
+  function isShotOrMoving(state) {
+    if (!state) return false;
+    // 1. 物理引擎真实击球滚动中标志
+    if (state.inPlay === true || state.isRolling === true || state.ballMoving === true) {
+      return true;
+    }
+    // 2. 真实出杆击打中的状态，严格排除包含 'move' / 'anim' 等相机旋转或手势调整视角的关键词
+    const phase = String(state.phase || state.status || state.gameState || state.state || '').toLowerCase();
+    if (phase) {
+      const activeShotPhases = ['shot', 'shooting', 'rolling', 'ballrolling', 'inplay'];
+      if (activeShotPhases.some((p) => phase === p || phase.startsWith(p + '_') || phase.startsWith(p + '-'))) {
+        return true;
+      }
+    }
+    // 3. 球体存在真实物理运动速度 (击球发生)
+    if (hasBallVelocity(state)) return true;
+
+    // 注意：旋转视角或拖动球杆方向属于正常瞄准交互，绝不当做击球运动，保证瞄准线平滑始终显示
+    return false;
+  }
+
+  /* ================================================================== */
+  /* 状态读取与快捷键微调适配器                                           */
+  /* ================================================================== */
+
+  function getGameGlobal(prop) {
+    const wins = collectCandidateWindows();
+    if (projection && projection.canvas && projection.canvas.ownerDocument) {
+      const ownerWin = projection.canvas.ownerDocument.defaultView;
+      if (ownerWin) {
+        try {
+          if (ownerWin[prop]) return ownerWin[prop];
+        } catch (_) {}
+      }
+    }
+    for (const w of wins) {
+      try {
+        if (w && w[prop]) return w[prop];
+      } catch (_) {}
+    }
+    return undefined;
+  }
+
+  let capturedCore = null;
+  let _liveRuleState = null;
+  let _liveNextTargets = null;
+  let _liveRuleResult = null;
+  let _frameOrMatchOver = false;
+  let _lastPottedKind = null; // 'red' | 'color' | null
+  let _turnPhase = 'reds'; // 'reds' | 'colorChoice' | 'clearance'
+  let _lastActiveRedCount = 15;
+  let _shotStartRedCount = 15;
+  const _hookedNamespaces = new WeakSet();
+  const _trappedWins = new WeakSet();
+
+  function onCoreRuleEvent(event) {
+    if (!event) return;
+    const res = event.result || event.detail?.result || event;
+    const rs = res.ruleState || res.snookerRuleState || event.ruleState;
+    const rr = res.ruleResult || event.ruleResult;
+
+    if (event.type === 'frame-over' || event.type === 'game-over' || res.frameOver || res.matchOver || res.gameOver || res.isOver) {
+      _frameOrMatchOver = true;
+      _liveRuleState = null;
+      _liveNextTargets = null;
+      _liveRuleResult = null;
+      if (overlay && overlay.canvas) overlay.clear();
+      return;
+    }
+
+    if (rs) {
+      _frameOrMatchOver = false;
+      _liveRuleState = rs;
+      if (rs.phase === 'colorChoice' || rs.phase === 'colors' || rs.phase === 'color') {
+        _turnPhase = 'colorChoice';
+      } else if (rs.phase === 'reds' || rs.phase === 'red') {
+        _turnPhase = 'reds';
+      } else if (rs.phase === 'clearance') {
+        _turnPhase = 'clearance';
+      }
+    }
+    if (rr) {
+      _liveRuleResult = rr;
+      if (Array.isArray(rr.pottedBalls) || Array.isArray(rr.potted)) {
+        const pb = rr.pottedBalls || rr.potted;
+        if (pb.some((b) => (b.kind === 'red' || b.type === 'red' || b.color === 'red' || b === 'red'))) {
+          _lastPottedKind = 'red';
+        } else if (pb.length > 0) {
+          _lastPottedKind = 'color';
+        }
+      }
+      if (Array.isArray(rr.nextTarget)) {
+        _liveNextTargets = rr.nextTarget;
+        if (_liveNextTargets.includes('red')) {
+          _turnPhase = 'reds';
+        } else if (_liveNextTargets.some((k) => k !== 'red')) {
+          _turnPhase = (_lastActiveRedCount === 0 && _lastPottedKind !== 'red') ? 'clearance' : 'colorChoice';
+        }
+      }
+    }
+  }
+
+  function wrapCoreNamespace(ns) {
+    if (!ns || typeof ns !== 'object' || _hookedNamespaces.has(ns)) return;
+    if (typeof ns.createThreeGameCore !== 'function') return;
+    _hookedNamespaces.add(ns);
+    const original = ns.createThreeGameCore;
+    try {
+      ns.createThreeGameCore = function (...args) {
+        const api = original.apply(this, args);
+        if (api && typeof api.getState === 'function') {
+          capturedCore = api;
+          _frameOrMatchOver = false;
+          _lastPottedKind = null;
+          _turnPhase = 'reds';
+          _shotStartRedCount = 15;
+          _lastActiveRedCount = 15;
+          NativeWorkerBridge.enableReboundInCore(api);
+
+          // 劫持生命周期销毁与清理 (退出房间时立即切断残留数据并清空画布)
+          const origDestroy = api.destroy;
+          if (typeof origDestroy === 'function') {
+            api.destroy = function (...dArgs) {
+              if (capturedCore === api) {
+                capturedCore = null;
+                _liveRuleState = null;
+                _liveNextTargets = null;
+                _liveRuleResult = null;
+                _lastPottedKind = null;
+              }
+              if (overlay && overlay.canvas) overlay.clear();
+              return origDestroy.apply(this, dArgs);
+            };
+          }
+          const origDispose = api.dispose;
+          if (typeof origDispose === 'function') {
+            api.dispose = function (...dArgs) {
+              if (capturedCore === api) {
+                capturedCore = null;
+                _liveRuleState = null;
+                _liveNextTargets = null;
+                _liveRuleResult = null;
+                _lastPottedKind = null;
+              }
+              if (overlay && overlay.canvas) overlay.clear();
+              return origDispose.apply(this, dArgs);
+            };
+          }
+
+          try {
+            if (typeof api.subscribe === 'function') {
+              api.subscribe((event) => {
+                onCoreRuleEvent(event);
+                SnookerSpy.handleCoreEvent(event);
+              });
+            }
+          } catch (_) {}
+        }
+        return api;
+      };
+    } catch (_) {}
+  }
+
+  function installCoreHook() {
+    const targets = collectCandidateWindows();
+    for (const win of targets) {
+      if (!win) continue;
+      NativeWorkerBridge.initWindow(win);
+      try {
+        if (win.SnookerThreeCore) {
+          wrapCoreNamespace(win.SnookerThreeCore);
+        } else if (!_trappedWins.has(win)) {
+          _trappedWins.add(win);
+          let _nsVal = undefined;
+          Object.defineProperty(win, 'SnookerThreeCore', {
+            configurable: true,
+            enumerable: true,
+            get() {
+              return _nsVal;
+            },
+            set(val) {
+              _nsVal = val;
+              wrapCoreNamespace(val);
+            },
+          });
+        }
+      } catch (_) {}
+    }
+  }
+
+  function extractValidState(candidate) {
+    if (!candidate) return null;
+    try {
+      const s = typeof candidate.getState === 'function' ? candidate.getState() : candidate;
+      if (s && typeof s === 'object' && Array.isArray(s.balls)) return s;
+    } catch (_) {}
+    return null;
+  }
+
+  function extractRawState() {
+    const tg = getGameGlobal('threeGame');
+    if (tg) {
+      const s = extractValidState(tg.core) || extractValidState(tg);
+      if (s) return s;
+    }
+
+    const sp = getGameGlobal('SnookerProduct');
+    if (sp) {
+      const s =
+        extractValidState(sp.practice) ||
+        extractValidState(sp.core) ||
+        extractValidState(sp.threeGame && sp.threeGame.core) ||
+        extractValidState(sp.threeGame) ||
+        extractValidState(sp);
+      if (s) return s;
+    }
+
+    const spl = getGameGlobal('SnookerProductLite');
+    if (spl) {
+      const s = extractValidState(spl.practice) || extractValidState(spl.core) || extractValidState(spl);
+      if (s) return s;
+    }
+
+    if (capturedCore) {
+      if (capturedCore.destroyed === true || capturedCore.isDestroyed === true) {
+        capturedCore = null;
+        return null;
+      }
+      NativeWorkerBridge.enableReboundInCore(capturedCore);
+      const s = extractValidState(capturedCore);
+      if (s) return s;
+    }
+
+    return null;
+  }
+
+  function readState() {
+    if (isLobbyMenuVisible()) {
+      return null;
+    }
+    const raw = extractRawState();
+    if (!raw) return null;
+    if (isSettlementOrGameOverScreen(raw)) {
+      return null;
+    }
+    return raw;
+  }
+
+  /* ================================================================== */
+  /* 【深度工具】SnookerSpy 游戏物理与函数实时爬虫工具                   */
+  /* ================================================================== */
+
+  function safeClone(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 3) return obj;
+    if (Array.isArray(obj)) return obj.slice(0, 50).map((item) => safeClone(item, depth + 1));
+    const out = {};
+    for (const k of Object.keys(obj)) {
+      if (k.startsWith('_') || typeof obj[k] === 'function') continue;
+      try {
+        out[k] = safeClone(obj[k], depth + 1);
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  function safeCloneState(state) {
+    if (!state) return null;
+    return {
+      cueBallId: state.cueBallId,
+      aim: state.aim ? {
+        direction: state.aim.direction ? { x: +state.aim.direction.x.toFixed(4), y: +state.aim.direction.y.toFixed(4) } : null,
+        power: state.aim.power,
+        tipOffset: state.aim.tipOffset ? { x: +state.aim.tipOffset.x.toFixed(3), y: +state.aim.tipOffset.y.toFixed(3) } : null,
+        verticalAngle: state.aim.verticalAngle,
+      } : null,
+      aimPrediction: state.aimPrediction ? {
+        hit: state.aimPrediction.hit,
+        contactBallId: state.aimPrediction.contactBallId,
+        cueCushionPaths: state.aimPrediction.cueCushionPaths,
+        targetPath: state.aimPrediction.targetPath,
+      } : null,
+      balls: Array.isArray(state.balls) ? state.balls.map((b) => ({
+        id: b.id,
+        kind: b.kind,
+        potted: b.potted,
+        pos: b.pos ? { x: +b.pos.x.toFixed(2), y: +b.pos.y.toFixed(2) } : null,
+      })) : [],
+    };
+  }
+
+  const SnookerSpy = {
+    enabled: false,
+    sessionStart: Date.now(),
+    shots: [],
+    aimSamples: [],
+    interceptedEvents: [],
+    activeShotRecord: null,
+    _lastSampleTime: 0,
+
+    start() {
+      this.enabled = true;
+      this.sessionStart = Date.now();
+      this.updateUI();
+      showToast('🕷 斯诺克数据爬虫已开启，开始记录击球与函数数据', 2000);
+    },
+
+    stop() {
+      this.enabled = false;
+      this.updateUI();
+      showToast('⏸ 斯诺克数据爬虫已暂停', 1500);
+    },
+
+    toggle() {
+      if (this.enabled) this.stop();
+      else this.start();
+    },
+
+    clear() {
+      this.shots = [];
+      this.aimSamples = [];
+      this.interceptedEvents = [];
+      this.activeShotRecord = null;
+      this.updateUI();
+      showToast('🧹 爬虫缓存已清空', 1200);
+    },
+
+    handleCoreEvent(event) {
+      if (!this.enabled || !event) return;
+      const type = event.type || 'unknown';
+      const record = {
+        time: Date.now() - this.sessionStart,
+        type,
+        detail: safeClone(event),
+      };
+      this.interceptedEvents.push(record);
+      if (this.interceptedEvents.length > 200) this.interceptedEvents.shift();
+
+      if (type === 'shot-start') {
+        const state = readState();
+        this.activeShotRecord = {
+          shotId: this.shots.length + 1,
+          startTime: Date.now(),
+          shotParams: event.shot || (state && state.shot) || {},
+          preShotState: safeCloneState(state),
+          events: [],
+          physicsFrames: [],
+        };
+      } else if (type === 'shot-end' || type === 'shot-settled' || type === 'reset') {
+        if (this.activeShotRecord) {
+          const state = readState();
+          this.activeShotRecord.endTime = Date.now();
+          this.activeShotRecord.durationMs = this.activeShotRecord.endTime - this.activeShotRecord.startTime;
+          this.activeShotRecord.postShotState = safeCloneState(state);
+          this.shots.push(this.activeShotRecord);
+          if (this.shots.length > 50) this.shots.shift();
+          this.activeShotRecord = null;
+          this.updateUI();
+        }
+      } else if (this.activeShotRecord) {
+        this.activeShotRecord.events.push(record);
+      }
+    },
+
+    recordAimFrame(state, nativeAp, assistantPred) {
+      if (!this.enabled || !state || !state.aim) return;
+      const now = performance.now();
+      if (now - this._lastSampleTime < 300) return;
+      this._lastSampleTime = now;
+
+      const cue = getCueBall(state);
+      const sample = {
+        timestamp: Date.now(),
+        cuePos: cue && cue.pos ? { x: +cue.pos.x.toFixed(2), y: +cue.pos.y.toFixed(2) } : null,
+        aimDirection: state.aim.direction ? { x: +state.aim.direction.x.toFixed(4), y: +state.aim.direction.y.toFixed(4) } : null,
+        power: state.aim.power,
+        tipOffset: state.aim.tipOffset ? { x: +state.aim.tipOffset.x.toFixed(3), y: +state.aim.tipOffset.y.toFixed(3) } : null,
+        verticalAngle: state.aim.verticalAngle,
+        nativePrediction: nativeAp ? {
+          hit: nativeAp.hit,
+          contactBallId: nativeAp.contactBallId,
+          contact: nativeAp.contact ? {
+            type: nativeAp.contact.type,
+            point: nativeAp.contact.point,
+            normal: nativeAp.contact.normal,
+            cutAngle: nativeAp.contact.cutAngle,
+          } : null,
+          cuePath: nativeAp.cuePath,
+          cueCushionPaths: nativeAp.cueCushionPaths,
+          targetPath: nativeAp.targetPath,
+          cueRollingDirection: nativeAp.cueDirectionPrediction?.cueRollingDirection,
+        } : null,
+        assistantPrediction: assistantPred ? {
+          targetBall: assistantPred.target ? assistantPred.target.ball?.id : null,
+          contact: assistantPred.target?.contact,
+          objectPath: assistantPred.target?.objectPath,
+          cushionRebounds: assistantPred.cuePost?.cueCushionPaths,
+        } : null,
+      };
+
+      this.aimSamples.push(sample);
+      if (this.aimSamples.length > 100) this.aimSamples.shift();
+      this.updateUI();
+    },
+
+    recordMotionFrame(state) {
+      if (!this.enabled || !this.activeShotRecord || !state) return;
+      if (this.activeShotRecord.physicsFrames.length >= 180) return;
+      const cue = getCueBall(state);
+      const frameData = {
+        t: Date.now() - this.activeShotRecord.startTime,
+        cuePos: cue && cue.pos ? { x: +cue.pos.x.toFixed(2), y: +cue.pos.y.toFixed(2) } : null,
+        cueVel: cue && (cue.vel || cue.v) ? { x: +(cue.vel?.x || cue.v?.x || 0).toFixed(2), y: +(cue.vel?.y || cue.v?.y || 0).toFixed(2) } : null,
+      };
+      this.activeShotRecord.physicsFrames.push(frameData);
+    },
+
+    exportJSON() {
+      const data = {
+        appName: '147Master Snooker Telemetry Crawler',
+        exportedAt: new Date().toISOString(),
+        sessionDurationSec: Math.round((Date.now() - this.sessionStart) / 1000),
+        shotCount: this.shots.length,
+        aimSampleCount: this.aimSamples.length,
+        eventCount: this.interceptedEvents.length,
+        shots: this.shots,
+        aimSamples: this.aimSamples,
+        events: this.interceptedEvents,
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `snooker_spy_data_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 500);
+      showToast('💾 爬虫数据已导出为 JSON 文件', 1500);
+    },
+
+    copyLatestShot() {
+      if (!this.shots.length && !this.aimSamples.length) {
+        showToast('暂无抓取数据，请先击球练习', 1500);
+        return;
+      }
+      const latest = this.shots[this.shots.length - 1] || this.aimSamples[this.aimSamples.length - 1];
+      const text = JSON.stringify(latest, null, 2);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          showToast('📋 最新击球/瞄准数据已复制到剪贴板', 1500);
+        }).catch(() => {
+          prompt('请手动复制以下数据:', text);
+        });
+      } else {
+        prompt('请手动复制以下数据:', text);
+      }
+    },
+
+    updateUI() {
+      const counterEl = document.getElementById('spy-counter');
+      if (counterEl) {
+        counterEl.textContent = `已抓取: ${this.shots.length} 次击球 / ${this.aimSamples.length} 条瞄准`;
+      }
+      const toggleBtn = document.getElementById('spy-toggle-btn');
+      if (toggleBtn) {
+        toggleBtn.textContent = this.enabled ? '⏸ 暂停爬虫' : '▶ 开启爬虫';
+        toggleBtn.style.background = this.enabled ? '#ff4d4f' : '#00ff88';
+        toggleBtn.style.color = this.enabled ? '#ffffff' : '#0b1a11';
+      }
+    },
+  };
+
+  try {
+    window.__snookerSpy__ = SnookerSpy;
+    window.__snookerSpyData__ = SnookerSpy;
+  } catch (_) {}
+
+  /* ================================================================== */
+  /* 【一键对齐】智能吸附最优进球线 (Space 空格 / 移动端按键)              */
+  /* ================================================================== */
+
+  function snapToPerfectPot() {
+    const state = readState();
+    if (!state) {
+      showToast('未检测到球局状态', 1200);
+      return false;
+    }
+    const cue = getCueBall(state);
+    if (!cue || !cue.pos) {
+      showToast('未检测到母球', 1200);
+      return false;
+    }
+    if (isSettlementOrGameOverScreen(state)) {
+      showToast('当前对局已结束', 1200);
+      return false;
+    }
+    if (isLoadingScreen(state)) {
+      showToast('对局加载中，请稍候', 1200);
+      return false;
+    }
+    if (isLobbyOrNonTableScreen(state)) {
+      showToast('当前处于大厅，未进入对局', 1200);
+      return false;
+    }
+    if (isShotOrMoving(state)) {
+      showToast('当前球局运动中，请等待静止', 1200);
+      return false;
+    }
+
+    const curDir = state.aim && state.aim.direction ? V.norm(state.aim.direction) : { x: 1, y: 0 };
+    const objects = activeObjectBalls(state);
+    if (!objects.length) {
+      showToast('台面上无可用目标球', 1200);
+      return false;
+    }
+
+    // ================================================================
+    // 斯诺克官方击球规则推导引擎 (Snooker Rule Engine)
+    // 判定当前合法目标球候选集 (严格区分 开球/打红球阶段 与 击进红球后的打彩球阶段)
+    // ================================================================
+    const activeReds = objects.filter((b) => b.kind === 'red');
+    const activeColors = objects.filter((b) => b.kind !== 'red');
+    const COLOR_CLEAR_ORDER = ['yellow', 'green', 'brown', 'blue', 'pink', 'black'];
+
+    // 1. 动态自适应阶段推导 (结合引擎实时事件与红球进袋自动状态机)
+    let currentPhase = 'reds';
+
+    if (activeReds.length === 0) {
+      // 台面已无红球：
+      // 若上一杆刚刚打进最后一颗红球，根据斯诺克官方规则，本杆可自由击打任意彩球 (进袋后复位)
+      // 若非刚进红球，则进入严格清彩阶段：按黄(2)->绿(3)->咖啡(4)->蓝(5)->粉(6)->黑(7)顺序击打
+      if (_lastPottedKind === 'red') {
+        currentPhase = 'colorChoice'; // 自由选择击打任意彩球
+      } else {
+        currentPhase = 'clearance'; // 严格按顺序清彩
+      }
+    } else {
+      // 台面上仍有红球 (开球15红球、10红球围球、6红球等)
+      // 默认必须击打红球，彩球绝对排除
+      if (_lastPottedKind === 'red') {
+        currentPhase = 'colorChoice';
+      } else if (_liveNextTargets && Array.isArray(_liveNextTargets)) {
+        if (_liveNextTargets.includes('red')) currentPhase = 'reds';
+        else if (_liveNextTargets.some((k) => k !== 'red')) currentPhase = 'colorChoice';
+      } else if (_liveRuleState && _liveRuleState.phase) {
+        if (_liveRuleState.phase === 'colorChoice' || _liveRuleState.phase === 'colors' || _liveRuleState.phase === 'color') currentPhase = 'colorChoice';
+        else if (_liveRuleState.phase === 'reds' || _liveRuleState.phase === 'red') currentPhase = 'reds';
+        else if (_liveRuleState.phase === 'clearance') currentPhase = 'clearance';
+      } else {
+        currentPhase = 'reds';
+      }
+
+      // 【核心意图防护】：若台面有红球，且玩家当前瞄准方向明显朝向红球（或射线相交/垂直距离<=40mm），
+      // 100% 尊重玩家击打红球的意图锁定红球，绝不误吸附到粉球/蓝球/绿球！
+      if (currentPhase === 'colorChoice') {
+        const aimsAtRed = activeReds.some((b) => {
+          const rc = rayContact(cue.pos, curDir, b);
+          if (rc) return true;
+          const v = V.sub(b.pos, cue.pos);
+          const proj = V.dot(v, curDir);
+          if (proj <= 0) return false;
+          const perp = Math.sqrt(Math.max(0, V.lenSq(v) - proj * proj));
+          return perp <= 40;
+        });
+        if (aimsAtRed) {
+          currentPhase = 'reds';
+        }
+      }
+    }
+
+    _turnPhase = currentPhase;
+    _lastActiveRedCount = activeReds.length;
+
+    let candidateBalls = [];
+
+    if (currentPhase === 'clearance') {
+      // 【清彩球阶段】必须按黄(2)->绿(3)->咖啡(4)->蓝(5)->粉(6)->黑(7)顺序击打
+      const nextColor = COLOR_CLEAR_ORDER.find((col) => objects.some((b) => b.kind === col));
+      candidateBalls = nextColor ? objects.filter((b) => b.kind === nextColor) : activeColors;
+    } else if (currentPhase === 'colorChoice') {
+      // 【打彩球阶段】（打进红球后，或打进最后一颗红球后自由选打任意彩球）
+      // 1. 检查玩家是否已有意朝向某颗彩球（35度角内寻找彩球）
+      let aimedColor = null;
+      let minAngleDist = Infinity;
+      for (const b of activeColors) {
+        const v = V.sub(b.pos, cue.pos);
+        const dist = V.len(v);
+        if (dist < 1e-3) continue;
+        const dir = V.norm(v);
+        const cosAngle = V.dot(curDir, dir);
+        if (cosAngle > 0.819) { // 35度锥角内
+          if (dist < minAngleDist) {
+            minAngleDist = dist;
+            aimedColor = b;
+          }
+        }
+      }
+      if (aimedColor) {
+        candidateBalls = [aimedColor];
+      } else {
+        // 若玩家尚未朝向某颗彩球，候选集为全部可打彩球（自动寻找角度最正、最易进袋的那颗彩球！）
+        candidateBalls = activeColors;
+      }
+    } else {
+      // 【打红球阶段】（开球首杆、10红球围球、常规红球：彩球绝对排除！粉球/蓝球/绿球绝不误吸！）
+      candidateBalls = activeReds;
+    }
+
+    if (!candidateBalls.length) candidateBalls = objects;
+
+    // 2. 识别用户当前瞄准意图的目标球 (精准物理相交 > 准星中心垂直距离 perp)
+    // 彻底解决“用户已瞄准一个球，一键对齐却选择旁边球”的缺陷：
+    // 严禁按到母球的投影距离 proj 排序，必须优先按准星中心垂直距离 perp 紧致匹配！
+    let userAimedBall = null;
+    let minRayTHit = Infinity;
+
+    // 策略 A: 优先检查当前瞄准射线是否物理相交命中某颗候选球 (严格按物理接触先后顺序)
+    for (const b of candidateBalls) {
+      const rc = rayContact(cue.pos, curDir, b);
+      if (rc && rc.tHit < minRayTHit) {
+        minRayTHit = rc.tHit;
+        userAimedBall = b;
+      }
+    }
+
+    // 策略 B: 若准星有轻微微调偏差未直接接触，以离瞄准中心线垂直距离(perp)最近的球为准
+    // 容差收紧至 40mm (约 1.5 倍球半径)，绝不大范围误抓相隔较远的邻球
+    if (!userAimedBall) {
+      let minPerpDist = Infinity;
+      for (const b of candidateBalls) {
+        const v = V.sub(b.pos, cue.pos);
+        const proj = V.dot(v, curDir);
+        if (proj <= 0) continue;
+        const perp = Math.sqrt(Math.max(0, V.lenSq(v) - proj * proj));
+        if (perp <= 40) {
+          if (perp < minPerpDist) {
+            minPerpDist = perp;
+            userAimedBall = b;
+          }
+        }
+      }
+    }
+
+    // 3. 【核心下球路线验证函数】：验证某球进某袋是否为“合法无阻挡下球路线”
+    // 严格满足四大物理法则：
+    // (1) evaluatePocket 判定有效且置信度大于0 (达到虚线圆或实线圆进球标记标准)
+    // (2) 切角硬性限制：cutAngleDeg <= 75° (cutDot >= 0.2588)，排除大角度贴库球与死角薄球
+    // (3) 【母球通路阻挡检测】：母球 -> 假想球 (cue -> contactG) 通路绝无任何球阻挡！(开球时彻底过滤粉球/蓝球遮挡)
+    // (4) 【目标球进袋阻挡检测】：目标球 -> 袋口 (ball -> pocket.opening) 通路绝无任何球阻挡！
+    const pockets = readPockets(state);
+    function evaluateValidRoute(ball, pk) {
+      const dirToPk = V.norm(V.sub(pk.opening, ball.pos));
+      const towardPk = V.dot(dirToPk, pk.normal);
+      if (towardPk <= 0.05) return null;
+
+      // 必须满足袋口有效宽度与入射角标准 (能产生虚线圆或实线圆进球标记)
+      const ev = evaluatePocket(ball.pos, dirToPk, pk);
+      if (!ev || ev.confidence <= 0) return null;
+
+      // 假想球接触点
+      const contactG = V.sub(ball.pos, V.scale(dirToPk, COLLISION_DIST_MM));
+      const cueDir = V.norm(V.sub(contactG, cue.pos));
+      const cutDot = V.dot(cueDir, dirToPk);
+      // 切角硬性上限：cos(75°) ≈ 0.2588，大于 75度的大角度贴库球在物理上绝不可能下球
+      if (cutDot < 0.2588) return null;
+      const cutAngleDeg = Math.acos(clamp(cutDot, -1, 1)) * 180 / Math.PI;
+
+      // 【双重物理障碍检测】：
+      // (a) 母球 -> 假想球 通路绝不能有障碍球！(开球时粉球、蓝球、阻挡红球直接过滤)
+      if (pathBlocked(cue.pos, contactG, objects, ball.id, cue.id)) return null;
+
+      // (b) 目标球 -> 袋口 通路绝不能有障碍球！
+      if (pathBlocked(ball.pos, pk.opening, objects, ball.id, cue.id)) return null;
+
+      // 综合评分：置信度(虚线/实线圆品质) + 切角正向度 - 进袋距离折减
+      const distObjToPk = V.dist(ball.pos, pk.opening);
+      const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000);
+
+      return {
+        ball,
+        pocket: pk,
+        contactG,
+        cueDir,
+        cutDot,
+        cutAngleDeg,
+        confidence: ev.confidence,
+        score,
+      };
+    }
+
+    // 4. 下球路线分级搜索与匹配
+    let chosenRoute = null;
+
+    // 优先级 1: 用户已有明确意向的目标球，在该球的所有袋口中寻找最佳合法路线
+    if (userAimedBall) {
+      let bestAimedScore = -Infinity;
+      for (const pk of pockets) {
+        const route = evaluateValidRoute(userAimedBall, pk);
+        if (route && route.score > bestAimedScore) {
+          bestAimedScore = route.score;
+          chosenRoute = route;
+        }
+      }
+    }
+
+    // 优先级 2: 若玩家瞄准的球被挡或无合法下球袋口，在准星近距离小锥角(25度)内寻找其他候选球
+    if (!chosenRoute) {
+      let bestNearbyScore = -Infinity;
+      for (const b of candidateBalls) {
+        if (userAimedBall && b.id === userAimedBall.id) continue;
+        const v = V.sub(b.pos, cue.pos);
+        const dist = V.len(v);
+        if (dist < 1e-3) continue;
+        const cosAngle = V.dot(curDir, V.norm(v));
+        if (cosAngle > 0.906) { // 25度锥角内
+          for (const pk of pockets) {
+            const route = evaluateValidRoute(b, pk);
+            if (route) {
+              const nearbyScore = route.score + (cosAngle * 1.5);
+              if (nearbyScore > bestNearbyScore) {
+                bestNearbyScore = nearbyScore;
+                chosenRoute = route;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 优先级 3: 全局搜索合法候选球的下球路线
+    if (!chosenRoute) {
+      let bestGlobalScore = -Infinity;
+      for (const b of candidateBalls) {
+        for (const pk of pockets) {
+          const route = evaluateValidRoute(b, pk);
+          if (route && route.score > bestGlobalScore) {
+            bestGlobalScore = route.score;
+            chosenRoute = route;
+          }
+        }
+      }
+    }
+
+    // 【关键指令处理】：如果所有目标球或袋口都没有下球路线，直接报错！绝不乱瞄，更不回退到被遮挡的错误路线！
+    if (!chosenRoute) {
+      showToast('⚠️ 当前无合法进球路线 (障碍球阻挡或无下球)', 2500);
+      return false;
+    }
+
+    const { ball: bestBall, pocket: targetPocket, cueDir: perfectAimDir, cutAngleDeg } = chosenRoute;
+
+    let phaseTag = '';
+    if (currentPhase === 'colorChoice') phaseTag = ' (彩球)';
+    else if (currentPhase === 'clearance') phaseTag = ' (清彩)';
+
+    const targetDesc = `「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}°${phaseTag}`;
+    const nextAngle = Math.atan2(perfectAimDir.y, perfectAimDir.x);
+
+    // 3. 执行瞄准对齐控制 (调用游戏核心底层 API: setDirection / aimAt)
+    const tg = getGameGlobal('threeGame');
+    const sp = getGameGlobal('SnookerProduct');
+    const practice = sp && sp.practice;
+    const controllers = [capturedCore, tg && tg.core, practice, sp && sp.core, tg].filter(Boolean);
+
+    let applied = false;
+    for (const ctrl of controllers) {
+      try {
+        if (typeof ctrl.setDirection === 'function') {
+          ctrl.setDirection(perfectAimDir);
+          applied = true;
+          break;
+        }
+        if (typeof ctrl.aimAt === 'function') {
+          const targetPoint = chosenRoute.contactG || bestBall.pos;
+          ctrl.aimAt(targetPoint);
+          applied = true;
+          break;
+        }
+        if (typeof ctrl.setAimDirection === 'function') {
+          ctrl.setAimDirection(perfectAimDir);
+          applied = true;
+          break;
+        }
+        if (typeof ctrl.setAimAngle === 'function') {
+          ctrl.setAimAngle(nextAngle);
+          applied = true;
+          break;
+        }
+      } catch (_) {}
+    }
+
+    try {
+      if (state.aim && state.aim.direction) {
+        state.aim.direction.x = perfectAimDir.x;
+        state.aim.direction.y = perfectAimDir.y;
+        if (typeof state.aim.angle === 'number') state.aim.angle = nextAngle;
+      }
+      state.aimPrediction = null;
+    } catch (_) {}
+
+    _lastGeomKey = null;
+    _lastRenderKey = null;
+    applied = true;
+
+    showToast(`🎯 已一键对准: ${targetDesc}`, 1500);
+    return true;
+  }
+
+  const _boundTapDocs = new WeakSet();
+  let _lastScreenTapTime = 0;
+  let _lastScreenTapPos = { x: 0, y: 0 };
+  let _screenTapCount = 0;
+  let _pendingDoubleTapTimer = null;
+
+  function togglePanelCircleVisibility() {
+    let handled = false;
+    if (ui && typeof ui.toggleCircleHidden === 'function') {
+      ui.toggleCircleHidden();
+      handled = true;
+    }
+    const wins = collectCandidateWindows();
+    for (const w of wins) {
+      try {
+        if (w && w !== window && w.__snookerAimUi__ && typeof w.__snookerAimUi__.toggleCircleHidden === 'function') {
+          w.__snookerAimUi__.toggleCircleHidden();
+          handled = true;
+        } else if (w && w.document) {
+          const p = w.document.getElementById('snooker-aim-panel');
+          if (p && (!ui || p !== ui.panel)) {
+            const isHidden = p.style.display === 'none';
+            p.style.display = isHidden ? 'block' : 'none';
+            handled = true;
+          }
+        }
+      } catch (_) {}
+    }
+    return handled;
+  }
+
+  function bindScreenMultiTap(doc) {
+    if (!doc || _boundTapDocs.has(doc)) return;
+    _boundTapDocs.add(doc);
+
+    const handleTap = (clientX, clientY, target) => {
+      // 严格排除控制面板与其子元素
+      if (target && target.closest && target.closest('#snooker-aim-panel')) return;
+
+      const now = performance.now();
+      const dt = now - _lastScreenTapTime;
+      // 过滤触摸屏上 pointerdown 和 touchstart 产生的纳秒级重复事件 (<40ms)
+      if (dt < 40 && _lastScreenTapTime > 0) return;
+
+      const dist = Math.hypot(clientX - _lastScreenTapPos.x, clientY - _lastScreenTapPos.y);
+
+      // 位移过大(超过 30px)判定为滑屏调杆，重置点击计数并取消待定双击
+      if (dist >= 30) {
+        if (_pendingDoubleTapTimer) {
+          clearTimeout(_pendingDoubleTapTimer);
+          _pendingDoubleTapTimer = null;
+        }
+        _screenTapCount = 1;
+        _lastScreenTapTime = now;
+        _lastScreenTapPos = { x: clientX, y: clientY };
+        return;
+      }
+
+      // 时间窗口：在 40ms ~ 330ms 之间且位移不超过 30px，累加点击次数；否则重置为第1击
+      if (dt >= 40 && dt <= 330) {
+        _screenTapCount++;
+      } else {
+        _screenTapCount = 1;
+      }
+
+      _lastScreenTapTime = now;
+      _lastScreenTapPos = { x: clientX, y: clientY };
+
+      if (_screenTapCount === 1) {
+        if (_pendingDoubleTapTimer) {
+          clearTimeout(_pendingDoubleTapTimer);
+          _pendingDoubleTapTimer = null;
+        }
+      } else if (_screenTapCount === 2) {
+        // 第二击：进入双击等待窗口 (220ms)。若后续 220ms 内未产生第三击，则判定为有效双击
+        if (_pendingDoubleTapTimer) {
+          clearTimeout(_pendingDoubleTapTimer);
+          _pendingDoubleTapTimer = null;
+        }
+        _pendingDoubleTapTimer = setTimeout(() => {
+          _pendingDoubleTapTimer = null;
+          _screenTapCount = 0;
+          if (CONFIG.doubleClickAlign) {
+            if (snapToPerfectPot()) {
+              try { if (navigator.vibrate) navigator.vibrate(25); } catch (_) {}
+            }
+          }
+        }, 220);
+      } else if (_screenTapCount >= 3) {
+        // 第三击：触发三击屏幕控制面板加号圆圈隐藏/重新显示！
+        if (_pendingDoubleTapTimer) {
+          clearTimeout(_pendingDoubleTapTimer);
+          _pendingDoubleTapTimer = null;
+        }
+        _screenTapCount = 0;
+        _lastScreenTapTime = 0; // 清除时间戳，防止第四次快速连击被串联
+        togglePanelCircleVisibility();
+        try { if (navigator.vibrate) navigator.vibrate([30, 40, 30]); } catch (_) {}
+      }
+    };
+
+    // 1. 监听 pointerdown (覆盖鼠标、触控笔与现代触摸屏)
+    doc.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
+      handleTap(e.clientX, e.clientY, e.target);
+    }, { passive: true, capture: true });
+
+    // 2. 兼顾 touchstart (兜底某些老旧或特殊嵌套环境)
+    doc.addEventListener('touchstart', (e) => {
+      if (!e.touches || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      handleTap(touch.clientX, touch.clientY, e.target);
+    }, { passive: true, capture: true });
+  }
+
+  function bindScreenDoubleTap(doc) {
+    bindScreenMultiTap(doc);
+  }
+
+  const _boundKeyDocs = new WeakSet();
+  function bindKeyboardShortcuts(doc) {
+    if (!doc || _boundKeyDocs.has(doc)) return;
+    _boundKeyDocs.add(doc);
+    bindScreenDoubleTap(doc);
+    doc.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey) return;
+      const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
+
+      // 【快捷键】Space 空格键一键对准进球线
+      if (e.code === 'Space' || e.key === ' ') {
+        if (snapToPerfectPot()) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+    }, true);
+  }
+
+  /* ================================================================== */
+  /* 球桌 Canvas 探测                                                    */
+  /* ================================================================== */
+
+  function queryCanvasesInRoot(root, out) {
+    if (!root || !root.querySelectorAll) return;
+    try {
+      const list = root.querySelectorAll('canvas');
+      for (const c of list) {
+        if (c.id !== 'snooker-aim-overlay' && c.isConnected) out.push(c);
+      }
+      const all = root.querySelectorAll('*');
+      for (const el of all) {
+        if (el.shadowRoot) queryCanvasesInRoot(el.shadowRoot, out);
+      }
+    } catch (_) {}
+  }
+
+  function findGameCanvasInDoc(doc) {
+    if (!doc) return null;
+    const scene = doc.getElementById('scene');
+    if (scene) {
+      if (scene.tagName && scene.tagName.toLowerCase() === 'canvas' && isCanvasActuallyVisible(scene)) {
+        return scene;
+      }
+      const inner = scene.querySelector('canvas');
+      if (inner && inner.id !== 'snooker-aim-overlay' && isCanvasActuallyVisible(inner)) {
+        return inner;
+      }
+    }
+    const canvases = [];
+    queryCanvasesInRoot(doc, canvases);
+    const visibleCanvases = canvases.filter((c) => isCanvasActuallyVisible(c));
+    if (!visibleCanvases.length) return null;
+    visibleCanvases.sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return (rb.width * rb.height) - (ra.width * ra.height);
+    });
+    return visibleCanvases[0] || null;
+  }
+
+  function findGameCanvas() {
+    const localCanvas = findGameCanvasInDoc(document);
+    if (localCanvas) return localCanvas;
+
+    if (window === window.top) {
+      const wins = collectCandidateWindows();
+      for (const w of wins) {
+        if (w === window || w === (typeof unsafeWindow !== 'undefined' ? unsafeWindow : null)) continue;
+        try {
+          if (w.document) {
+            const subCanvas = findGameCanvasInDoc(w.document);
+            if (subCanvas) return subCanvas;
+          }
+        } catch (_) {}
+      }
+    }
+    return null;
+  }
+
+  function hasGameSurface() {
+    return Boolean(findGameCanvas());
+  }
+
+  /* ================================================================== */
+  /* 跨帧调试与远程操作同步                                               */
+  /* ================================================================== */
+
+  const REMOTE_BRIDGE_KEY = '__snookerAimRemoteBridge__';
+  let _remoteDebugState = null;
+
+  function setupTopMessageListener() {
+    if (window !== window.top) return;
+    window.addEventListener('message', (e) => {
+      const d = e && e.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'SNOOKER_AIM_DEBUG_SYNC' && typeof d.text === 'string') {
+        _remoteDebugState = { text: d.text, ts: Date.now() };
+      }
+    });
+  }
+  setupTopMessageListener();
+
+  function publishFrameDebugToTop(debugText) {
+    if (window === window.top) return;
+    const nowEpoch = Date.now();
+    try {
+      if (window.top) {
+        window.top[REMOTE_BRIDGE_KEY] = {
+          text: debugText,
+          ts: nowEpoch,
+          ownerWin: window,
+        };
+      }
+    } catch (_) {}
+    try {
+      window.top.postMessage({ type: 'SNOOKER_AIM_DEBUG_SYNC', text: debugText }, '*');
+    } catch (_) {}
+  }
+
+  function readActiveRemoteDebug() {
+    if (window !== window.top) return null;
+    const nowEpoch = Date.now();
+    try {
+      const bridge = window[REMOTE_BRIDGE_KEY];
+      if (bridge && typeof bridge.text === 'string' && (nowEpoch - bridge.ts) < 1500) {
+        return bridge;
+      }
+    } catch (_) {}
+    if (_remoteDebugState && (nowEpoch - _remoteDebugState.ts) < 1500) {
+      return _remoteDebugState;
+    }
+    return null;
+  }
+
+  /* ================================================================== */
+  /* 控制面板常驻判定与单例管理                                           */
+  /* ================================================================== */
+
+  function shouldMountPanelInThisWindow() {
+    if (window === window.top) return true;
+    try {
+      if (window.top && window.top.document && window.top.document.getElementById('snooker-aim-panel')) {
+        return false;
+      }
+    } catch (_) {
+      return hasGameSurface();
+    }
+    return hasGameSurface();
+  }
+
+  /* 手机端便捷悬浮触控栏 (左下角UI已移除，由控制面板加号双击对齐完全替代) */
+  const mobileDock = {
+    el: null,
+    ensure() {
+      if (typeof document !== 'undefined' && document.body) {
+        document.querySelectorAll('#snooker-mobile-dock').forEach((e) => e.remove());
+      }
+    },
+  };
+
+  function ensureUiBuilt() {
+    if (shouldMountPanelInThisWindow()) {
+      if (document.body) {
+        ui.ensure();
+        mobileDock.ensure();
+      } else {
+        window.addEventListener('DOMContentLoaded', () => {
+          if (shouldMountPanelInThisWindow()) {
+            ui.ensure();
+            mobileDock.ensure();
+          }
+        }, { once: true });
+      }
+    }
+  }
+
+  function removeUiFromOtherFrames() {
+    if (window !== window.top) return;
+    const walk = (win, depth) => {
+      if (!win || depth > 5) return;
+      try {
+        if (win !== window && win.document) {
+          win.document.querySelectorAll('#snooker-aim-panel, #snooker-mobile-dock').forEach((el) => el.remove());
+        }
+      } catch (_) {}
+      let frames = null;
+      try { frames = win.frames; } catch (_) { return; }
+      if (!frames || typeof frames.length !== 'number') return;
+      for (let i = 0; i < frames.length; i++) walk(frames[i], depth + 1);
+    };
+    try { walk(window, 0); } catch (_) {}
+  }
+
+  function getCueBall(state) {
+    if (!state || !Array.isArray(state.balls)) return null;
+    const byId = (state.cueBallId != null) ? state.balls.find((b) => b.id === state.cueBallId) : null;
+    if (byId) return byId;
+    return state.balls.find((b) => b.kind === 'cue') || null;
+  }
+
+  function activeObjectBalls(state) {
+    if (!state || !Array.isArray(state.balls)) return [];
+    return state.balls.filter(
+      (b) => b && b.kind !== 'cue' && !b.potted && b.pos && Number.isFinite(b.pos.x)
+    );
+  }
+
+  function activeAllBalls(state) {
+    if (!state || !Array.isArray(state.balls)) return [];
+    return state.balls.filter(
+      (b) => b && !b.potted && b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y)
+    );
+  }
+
+  const POCKET_LABELS = {
+    'middle-top': '上中袋', 'middle-bottom': '下中袋',
+    'corner-top-right': '右上袋', 'corner-top-left': '左上袋',
+    'corner-bottom-right': '右下袋', 'corner-bottom-left': '左下袋',
+  };
+
+  function mergeSources(sources) {
+    const byId = new Map();
+    sources.forEach((src, si) => {
+      if (!Array.isArray(src)) return;
+      for (const item of src) {
+        if (!item || !item.id) continue;
+        if (!byId.has(item.id)) byId.set(item.id, {});
+        byId.get(item.id)[`s${si}`] = item;
+      }
+    });
+    return byId;
+  }
+
+  function readPockets(state) {
+    const colliders = state && state.tableColliderSet && Array.isArray(state.tableColliderSet.pockets)
+      ? state.tableColliderSet.pockets : [];
+    const simple = state && Array.isArray(state.pockets) ? state.pockets : [];
+    const merged = mergeSources([colliders, simple, FALLBACK_POCKETS]);
+
+    const result = [];
+    for (const [id, srcs] of merged) {
+      const c = srcs.s0 || {};
+      const sp = srcs.s1 || {};
+      const fb = srcs.s2 || {};
+      const center = c.center || sp.center || fb.center || { x: 0, y: 0 };
+      const opening = (c.openingDefinition && c.openingDefinition.center) || c.opening || sp.opening || fb.opening || center;
+      const throatWidthMm =
+        (c.openingDefinition && c.openingDefinition.throatWidthMm) ||
+        c.throatWidthMm || sp.throatWidthMm || fb.throatWidthMm || THROAT_WIDTH_MM;
+      const drop = c.dropDirection || sp.dropDirection || fb.dropDirection || { x: 0, y: -1 };
+      const normal = V.norm(drop);
+      result.push({
+        id,
+        label: POCKET_LABELS[id] || id,
+        type: c.type || sp.type || fb.type || 'corner',
+        center,
+        opening,
+        normal,
+        tangent: { x: -normal.y, y: normal.x },
+        throatWidthMm,
+        captureRadius: c.captureRadius || (c.blackHole && c.blackHole.radius) || sp.captureRadius || fb.captureRadius || DEFAULT_CAPTURE_RADIUS,
+      });
+    }
+    return result;
+  }
+
+  /* ================================================================== */
+  /* 进袋判定（几何扫描与容差置信度评估）                                   */
+  /* ================================================================== */
+
+  function evaluatePocket(ballPos, dir, pocket) {
+    if (!pocket || !pocket.opening) return null;
+    const normal = pocket.normal || V.norm(pocket.dropDirection || { x: 0, y: -1 });
+    const tangent = pocket.tangent || { x: -normal.y, y: normal.x };
+    const toward = V.dot(dir, normal);
+    if (toward <= 1e-6) return null;
+    const v = V.sub(pocket.opening, ballPos);
+    const depth = V.dot(v, normal);
+    if (depth <= 0) return null;
+    const s = depth / toward;
+    if (s <= 0) return null;
+    const arrive = V.add(ballPos, V.scale(dir, s));
+    const tan = V.dot(V.sub(arrive, pocket.opening), tangent);
+    const angleDeg = Math.acos(clamp(toward, -1, 1)) * 180 / Math.PI;
+    const inc = incidenceAt(pocket.type, angleDeg);
+    const half = inc.widthMm / 2;
+    if (half <= 0 || Math.abs(tan) > half) return null;
+    const alignConf = 1 - Math.abs(tan) / half;
+    const confidence = clamp(alignConf * inc.coef, 0, 1);
+    return {
+      s, tan, half, angleDeg, widthMm: inc.widthMm, coef: inc.coef,
+      alignConf, confidence, enterPoint: arrive,
+    };
+  }
+
+  function pathBlocked(start, end, balls, blockedId, cueId) {
+    const seg = V.sub(end, start);
+    const len2 = seg.x * seg.x + seg.y * seg.y;
+    if (len2 <= 1e-9) return false;
+    for (const b of balls) {
+      if (b.id === blockedId || b.id === cueId || b.potted || !b.pos) continue;
+      const w = V.sub(b.pos, start);
+      const u = clamp(V.dot(w, seg) / len2, 0, 1);
+      const closest = V.add(start, V.scale(seg, u));
+      if (V.dist(closest, b.pos) < COLLISION_DIST_MM - 0.5) return true;
+    }
+    return false;
+  }
+
+  let _autoAimAvailable = null;
+  let _autoAimCheckTime = 0;
+  const AUTO_AIM_CHECK_INTERVAL = 2000;
+
+  function isAutoAimAvailable() {
+    const now = performance.now();
+    if (_autoAimAvailable !== null && now - _autoAimCheckTime < AUTO_AIM_CHECK_INTERVAL) {
+      return _autoAimAvailable;
+    }
+    _autoAimCheckTime = now;
+    const auto = getGameGlobal('SnookerAutoAim');
+    _autoAimAvailable = Boolean(
+      auto && typeof auto.estimatePotProbability === 'function'
+    );
+    return _autoAimAvailable;
+  }
+
+  function queryEngineRoute(state, cueBall, objectBall, pocketId) {
+    if (!isAutoAimAvailable()) return null;
+    try {
+      const rawPocket = state.tableColliderSet && Array.isArray(state.tableColliderSet.pockets)
+        ? state.tableColliderSet.pockets.find((p) => p.id === pocketId) : null;
+      if (!rawPocket) return null;
+      const auto = getGameGlobal('SnookerAutoAim');
+      if (!auto) return null;
+      const route = auto.estimatePotProbability({
+        cueBall, objectBall, pocket: rawPocket, balls: state.balls || [],
+      });
+      if (!route) return null;
+      return {
+        blocked: Boolean(route.blocked),
+        hitRate: Number.isFinite(route.hitRate) ? clamp(route.hitRate, 0, 1) : null,
+        angleDeg: route.pocketIncidence && Number.isFinite(route.pocketIncidence.angleDeg)
+          ? Math.abs(route.pocketIncidence.angleDeg) : null,
+      };
+    } catch (err) {
+      devLog('warn', 'queryEngineRoute 异常:', err);
+      return null;
+    }
+  }
+
+  /* ================================================================== */
+  /* 几何与物理联合预测                                                      */
+  /* ================================================================== */
+
+  // 精确球体相交检测 (完全对齐 147master 原生 AimContactGeometry.rayCircleHit, 严禁虚假膨胀)
+  function rayContact(cuePos, d, ball) {
+    const movingRadius = BALL_RADIUS_MM;
+    const targetRadius = (ball && ball.radius) || BALL_RADIUS_MM;
+    const totalRadius = movingRadius + targetRadius; // 严格等于 52.5mm，绝不额外增加膨胀容差
+
+    const offset = { x: cuePos.x - ball.pos.x, y: cuePos.y - ball.pos.y };
+    const b = 2 * (offset.x * d.x + offset.y * d.y);
+    const c = (offset.x * offset.x + offset.y * offset.y) - totalRadius * totalRadius;
+    if (c <= 0 && b >= 0) return null;
+    const disc = b * b - 4 * c;
+    if (disc < 0) return null; // 判别式小于0表示未碰撞(擦肩而过)，绝对判定为Miss
+
+    const root = Math.sqrt(disc);
+    const t1 = (-b - root) / 2;
+    const tHit = c <= 0 ? 0 : (t1 >= 0 ? t1 : null);
+    if (tHit === null || tHit <= 0) return null;
+
+    const G = {
+      x: cuePos.x + d.x * tHit,
+      y: cuePos.y + d.y * tHit,
+    };
+    return { G, tHit, distance: tHit };
+  }
+
+  /* ================================================================== */
+  /* 【物理模拟】切向抛投(CIT)、Mathavan 库边动力学与母球走位轨迹        */
+  /* ================================================================== */
+
+  // 1. 切向摩擦抛投修正（Cut-Induced Throw）
+  function applyCutInducedThrow(dir, normal, impactSpeed) {
+    const cosCut = clamp(V.dot(dir, normal), -1, 1);
+    const sinCut = Math.sqrt(Math.max(0, 1 - cosCut * cosCut));
+    if (sinCut < 0.02 || cosCut < 0.05) return normal;
+
+    const tangent = { x: -normal.y, y: normal.x };
+    const sign = V.dot(dir, tangent) >= 0 ? 1 : -1;
+    const speedScale = 1 / (1 + (impactSpeed / 2400));
+    const throwAngleRad = (CONFIG.throwFrictionCoef || 0.038) * sinCut * cosCut * speedScale * sign;
+    return V.rotate(normal, throwAngleRad);
+  }
+
+  // 2. 147master 原生库边速度修正样条 (三次 Hermite 样条插值: 1m/s~0.95 -> 7m/s~0.83)
+  const CUSHION_SPEED_KNOTS = [
+    [1, 0.95], [2, 0.94], [3, 0.92], [3.5, 0.91], [5, 0.865], [7, 0.83],
+  ];
+  const CUSHION_SECANTS = CUSHION_SPEED_KNOTS.slice(1).map((p, i) =>
+    (p[1] - CUSHION_SPEED_KNOTS[i][1]) / (p[0] - CUSHION_SPEED_KNOTS[i][0])
+  );
+  const CUSHION_SLOPES = CUSHION_SPEED_KNOTS.map((p, i) => {
+    if (i === 0 || i === CUSHION_SPEED_KNOTS.length - 1) return 0;
+    const left = p[0] - CUSHION_SPEED_KNOTS[i - 1][0];
+    const right = CUSHION_SPEED_KNOTS[i + 1][0] - p[0];
+    const w1 = 2 * right + left;
+    const w2 = right + 2 * left;
+    return (w1 + w2) / (w1 / CUSHION_SECANTS[i - 1] + w2 / CUSHION_SECANTS[i]);
+  });
+
+  function calibratedCushionRestitution(normalSpeedMmS) {
+    const speed = Math.max(0, Number(normalSpeedMmS) || 0) / 1000;
+    if (speed <= CUSHION_SPEED_KNOTS[0][0]) return CUSHION_SPEED_KNOTS[0][1];
+    const last = CUSHION_SPEED_KNOTS.length - 1;
+    if (speed >= CUSHION_SPEED_KNOTS[last][0]) return CUSHION_SPEED_KNOTS[last][1];
+    const i = CUSHION_SPEED_KNOTS.findIndex((p, j) => j < last && speed >= p[0] && speed < CUSHION_SPEED_KNOTS[j + 1][0]);
+    const [x, y] = CUSHION_SPEED_KNOTS[i];
+    const [nextX, nextY] = CUSHION_SPEED_KNOTS[i + 1];
+    const h = nextX - x;
+    const t = (speed - x) / h;
+    return (2 * t ** 3 - 3 * t ** 2 + 1) * y
+      + (t ** 3 - 2 * t ** 2 + t) * h * CUSHION_SLOPES[i]
+      + (-2 * t ** 3 + 3 * t ** 2) * nextY
+      + (t ** 3 - t ** 2) * h * CUSHION_SLOPES[i + 1];
+  }
+
+  function getCushionRestitution(base, normalSpeedMmS) {
+    const cal = calibratedCushionRestitution(normalSpeedMmS);
+    return Math.max(0, Math.min(1, base + (cal - 0.95)));
+  }
+
+  // 3. Mathavan (2010) 64步累积冲量库边碰撞动力学求解器 (完全对齐 147master 原生 v3CushionCollision)
+  function resolvePhysicsCushionRebound(vel, omega, normal, params = {}) {
+    const approachSpeed = -(vel.x * normal.x + vel.y * normal.y);
+    if (approachSpeed <= 0) return { vel: { ...vel }, omega: { ...omega } };
+
+    const R = BALL_RADIUS_MM;
+    const mass = 1;
+    const sinTheta = 0.4; // noseRatio = 1.4 -> sinTheta = 0.4
+    const cosTheta = Math.sqrt(Math.max(1e-12, 1 - sinTheta * sinTheta)); // ~0.916515
+    const cushionMu = CONFIG.cushionContactFrictionMu || 0.18;
+    const clothMu = CONFIG.clothSlidingMu || 0.18;
+    const baseRestitution = params.restitution || CONFIG.railRestitution || 0.98;
+    const energeticRestitution = getCushionRestitution(baseRestitution, approachSpeed);
+
+    const tangent = { x: -normal.y, y: normal.x };
+    const towardCushion = { x: -normal.x, y: -normal.y };
+
+    const state = {
+      vx: vel.x * tangent.x + vel.y * tangent.y,
+      vy: vel.x * towardCushion.x + vel.y * towardCushion.y,
+      wx: (omega.x || 0) * tangent.x + (omega.y || 0) * tangent.y,
+      wy: (omega.x || 0) * towardCushion.x + (omega.y || 0) * towardCushion.y,
+      wz: omega.z || 0,
+    };
+
+    const impulseSteps = 64;
+    const dPI = (mass * state.vy / Math.max(cosTheta, 0.1)) / impulseSteps;
+    const inverseMass = 1 / mass;
+    const angularScale = 5 / (2 * mass * R);
+
+    let compressionWork = 0;
+    let recoveryWork = 0;
+    let compressed = false;
+    let previousNormalSpeed = state.vy * cosTheta;
+
+    for (let iter = 0; iter < impulseSteps * 4; iter++) {
+      const cushionX = state.vx + R * (state.wy * sinTheta - state.wz * cosTheta);
+      const cushionYPrime = R * state.wx - state.vy * sinTheta;
+      const clothX = state.vx - R * state.wy;
+      const clothY = state.vy + R * state.wx;
+
+      const cushionMag = Math.hypot(cushionX, cushionYPrime);
+      const cushionDirX = cushionMag <= 1e-7 ? 0 : cushionX / cushionMag;
+      const cushionDirY = cushionMag <= 1e-7 ? 0 : cushionYPrime / cushionMag;
+
+      const dPxI = -cushionMu * cushionDirX * dPI;
+      const dPyPrimeI = -cushionMu * cushionDirY * dPI;
+      const dPC = Math.max(0, (sinTheta + cushionMu * cushionDirY * cosTheta) * dPI);
+
+      const clothMag = Math.hypot(clothX, clothY);
+      const clothDirX = clothMag <= 1e-7 ? 0 : clothX / clothMag;
+      const clothDirY = clothMag <= 1e-7 ? 0 : clothY / clothMag;
+
+      const dPxC = -clothMu * clothDirX * dPC;
+      const dPyC = -clothMu * clothDirY * dPC;
+
+      state.vx += (dPxI + dPxC) * inverseMass;
+      state.vy += (-dPI * cosTheta - dPyPrimeI * sinTheta + dPyC) * inverseMass;
+      state.wx += angularScale * (dPyPrimeI + dPyC);
+      state.wy += angularScale * (dPxI * sinTheta - dPxC);
+      state.wz -= angularScale * dPxI * cosTheta;
+
+      const normalSpeed = state.vy * cosTheta;
+      const avgNormalSpeed = (previousNormalSpeed + normalSpeed) / 2;
+      if (!compressed) {
+        if (avgNormalSpeed > 0) compressionWork += avgNormalSpeed * dPI;
+        if (normalSpeed <= 0) compressed = true;
+      } else {
+        recoveryWork += Math.max(0, -avgNormalSpeed) * dPI;
+        if (recoveryWork >= energeticRestitution * energeticRestitution * compressionWork) break;
+      }
+      previousNormalSpeed = normalSpeed;
+    }
+
+    const newVel = {
+      x: tangent.x * state.vx + towardCushion.x * state.vy,
+      y: tangent.y * state.vx + towardCushion.y * state.vy,
+    };
+    const newOmega = {
+      x: tangent.x * state.wx + towardCushion.x * state.wy,
+      y: tangent.y * state.wx + towardCushion.y * state.wy,
+      z: state.wz,
+    };
+
+    return { vel: newVel, omega: newOmega };
+  }
+
+  // 4. 真实物理反弹追踪（综合入杆力度、切球衰减、旋转与吃库冲量积分）
+  function tracePhysicsRailReflections(startPos, initialVel, initialOmega, cushionX, cushionY, pockets, maxBounces = 2) {
+    const segments = [];
+    let curPos = { ...startPos };
+    let vel = { ...initialVel };
+    let omega = { ...initialOmega };
+
+    for (let b = 0; b < maxBounces; b++) {
+      const curSpeed = Math.hypot(vel.x, vel.y);
+      if (curSpeed < 25) break;
+      const dir = { x: vel.x / curSpeed, y: vel.y / curSpeed };
+      const hit = rayRailHit(curPos, dir, cushionX, cushionY, pockets);
+      if (!hit) break;
+
+      segments.push({ from: { ...curPos }, to: { ...hit.point }, axis: hit.axis });
+      if (hit.axis === 'jaw') break;
+
+      let railNormal = { x: 0, y: 0 };
+      if (hit.axis === 'x') {
+        railNormal = { x: hit.point.x > 0 ? -1 : 1, y: 0 };
+      } else if (hit.axis === 'y') {
+        railNormal = { x: 0, y: hit.point.y > 0 ? -1 : 1 };
+      } else {
+        break;
+      }
+
+      const dist = Math.hypot(hit.point.x - curPos.x, hit.point.y - curPos.y);
+      const decel = CONFIG.clothRollingDecelMmS2 || 110;
+      const impactSpeed = Math.sqrt(Math.max(100, curSpeed * curSpeed - 2 * decel * dist));
+      const speedRatio = impactSpeed / curSpeed;
+      vel.x *= speedRatio;
+      vel.y *= speedRatio;
+
+      const rebound = resolvePhysicsCushionRebound(vel, omega, railNormal);
+      vel = rebound.vel;
+      omega = rebound.omega;
+      curPos = { ...hit.point };
+    }
+    return segments;
+  }
+
+  // 兼容旧接口别名
+  function traceRailReflections(startPos, dir, cushionX, cushionY, pockets, maxBounces = 2) {
+    const speed = CONFIG.canonicalSimSpeedMmS || 3400;
+    const v = { x: dir.x * speed, y: dir.y * speed };
+    const w = { x: -dir.y * (speed / BALL_RADIUS_MM), y: dir.x * (speed / BALL_RADIUS_MM), z: 0 };
+    return tracePhysicsRailReflections(startPos, v, w, cushionX, cushionY, pockets, maxBounces);
+  }
+
+  // 5.1 准星直射库边时的真实吃库反弹折线模拟 (从库边碰撞点直接向台内推演，保证100%必出反弹折线)
+  function simulateDirectCushionRebound(cuePos, railHit, aimDir, tipOffset, power, verticalAngle, cushionX, cushionY, pockets) {
+    const R = BALL_RADIUS_MM;
+    const maxCenterSpeed = CONFIG.maxCuePowerMmS || 7000;
+    const effPower = Number(power) > 2 ? clamp(Number(power), 2, 100) : 50;
+    const retention = tipSpeedRetention(tipOffset);
+    const elevRetention = resolveV3ElevationRetention(verticalAngle);
+    const initialSpeed = maxCenterSpeed * (effPower / 100) * retention * elevRetention;
+    if (initialSpeed <= 15) return null;
+
+    const hitPt = (railHit && railHit.point) ? railHit.point : (railHit || cuePos);
+    const distMm = Math.hypot(hitPt.x - cuePos.x, hitPt.y - cuePos.y);
+    const rollingDecel = CONFIG.clothRollingDecelMmS2 || 110;
+    // 计算到达库边时的衰减残余动能速度 (保证长距离击打仍能完整展现反弹折线)
+    const vArrival = Math.max(120, Math.sqrt(Math.max(14400, initialSpeed * initialSpeed - 2 * rollingDecel * distMm)));
+
+    // 到达库边时的运动状态 (滚动线速度 + 加塞自旋)
+    const velIn = { x: aimDir.x * vArrival, y: aimDir.y * vArrival };
+    const spinFactor = 2.5 * (CONFIG.cueSpinEfficiency || 0.70);
+    const spinRetention = Math.max(0.35, 1 - 0.00015 * distMm);
+    const omegaIn = {
+      x: -aimDir.y * (vArrival / R),
+      y: aimDir.x * (vArrival / R),
+      z: -(initialSpeed / R) * spinFactor * (tipOffset.x || 0) * spinRetention,
+    };
+
+    // 在库边发生碰撞反弹 (Mathavan 64步动力学冲量积分 + Hermite 恢复系数)
+    const railNorm = (railHit && railHit.normal)
+      ? railHit.normal
+      : (railHit && railHit.axis === 'x' ? { x: aimDir.x > 0 ? -1 : 1, y: 0 } : { x: 0, y: aimDir.y > 0 ? -1 : 1 });
+    const reb = resolvePhysicsCushionRebound(velIn, omegaIn, railNorm);
+
+    // 从库边反弹点向台内追踪反弹折线 (途径2: 原生V3动力学模型移植)
+    const dt = 1 / 120;
+    const maxSteps = 960;
+    let curVel = { ...reb.vel };
+    let curOmega = { ...reb.omega };
+    let curPos = { x: hitPt.x, y: hitPt.y };
+    const cushionPaths = [[{ x: curPos.x, y: curPos.y }]];
+    let travelledMm = 0;
+    const maxPathMm = 400; // 严格对齐游戏原生 predictRebound 400mm 规范
+    let isSliding = true;
+
+    for (let step = 0; step < maxSteps; step++) {
+      const curSpeed = Math.hypot(curVel.x, curVel.y);
+      if (curSpeed < 8 && Math.hypot(curOmega.x, curOmega.y) < 0.25) break;
+
+      if (isSliding) {
+        const slip = {
+          x: curVel.x - curOmega.y * R,
+          y: curVel.y + curOmega.x * R,
+        };
+        const slipSpeed = Math.hypot(slip.x, slip.y);
+        if (slipSpeed <= 2.0) {
+          curOmega.x = -curVel.y / R;
+          curOmega.y = curVel.x / R;
+          isSliding = false;
+        } else {
+          const slipCoupling = 3.5;
+          const slidingAccel = (CONFIG.clothSlidingMu || 0.18) * 9810;
+          const maxLinearChange = Math.min(slidingAccel * dt, slipSpeed / slipCoupling);
+          const deltaVx = -slip.x / slipSpeed * maxLinearChange;
+          const deltaVy = -slip.y / slipSpeed * maxLinearChange;
+          curVel.x += deltaVx;
+          curVel.y += deltaVy;
+          curOmega.x += deltaVy * 2.5 / R;
+          curOmega.y -= deltaVx * 2.5 / R;
+        }
+      } else {
+        const decel = CONFIG.clothRollingDecelMmS2 || 110;
+        const nextSpeed = Math.max(0, curSpeed - decel * dt);
+        if (nextSpeed <= 0) break;
+        const ratio = nextSpeed / curSpeed;
+        curVel.x *= ratio;
+        curVel.y *= ratio;
+        curOmega.x = -curVel.y / R;
+        curOmega.y = curVel.x / R;
+      }
+
+      if (Math.abs(curOmega.z) > 0) {
+        const decay = (CONFIG.clothSideSpinDecelRadS2 || 16) * dt;
+        curOmega.z = Math.sign(curOmega.z) * Math.max(0, Math.abs(curOmega.z) - decay);
+      }
+
+      const nextPos = { x: curPos.x + curVel.x * dt, y: curPos.y + curVel.y * dt };
+      const stepDist = Math.hypot(nextPos.x - curPos.x, nextPos.y - curPos.y);
+
+      if (travelledMm + stepDist >= maxPathMm) {
+        const remain = maxPathMm - travelledMm;
+        const frac = stepDist > 1e-4 ? remain / stepDist : 0;
+        cushionPaths[0].push({
+          x: curPos.x + (nextPos.x - curPos.x) * frac,
+          y: curPos.y + (nextPos.y - curPos.y) * frac,
+        });
+        travelledMm = maxPathMm;
+        break;
+      }
+
+      travelledMm += stepDist;
+
+      let hitRail = false;
+      if (Math.abs(nextPos.x) >= cushionX) {
+        hitRail = true;
+        curPos.x = Math.sign(nextPos.x) * cushionX;
+      }
+      if (Math.abs(nextPos.y) >= cushionY) {
+        hitRail = true;
+        curPos.y = Math.sign(nextPos.y) * cushionY;
+      }
+
+      if (hitRail) {
+        cushionPaths[0].push({ x: curPos.x, y: curPos.y });
+        break; // 严格只计算一库反弹折线
+      } else {
+        curPos = nextPos;
+        if (step % 2 === 0) {
+          cushionPaths[0].push({ x: curPos.x, y: curPos.y });
+        }
+      }
+    }
+
+    const p0 = cushionPaths[0];
+    if (p0.length > 0 && (p0[p0.length - 1].x !== curPos.x || p0[p0.length - 1].y !== curPos.y)) {
+      p0.push({ x: curPos.x, y: curPos.y });
+    }
+    if (p0.length < 2) {
+      p0.push({
+        x: curPos.x + (curVel.x !== 0 ? curVel.x * 0.1 : 1),
+        y: curPos.y + (curVel.y !== 0 ? curVel.y * 0.1 : 1),
+      });
+    }
+
+    return {
+      cuePostPath: null,
+      cueCushionPaths: cushionPaths,
+      path: cushionPaths.flat(),
+      restPos: curPos,
+      method: 'algo',
+    };
+  }
+
+  // 兼容别名 (母球分离走位线已移除，保留接口别名指向吃库反弹求解器)
+  const simulateCuePostPath = simulateDirectCushionRebound;
+  const simulateCuePostAndCushionPaths = simulateDirectCushionRebound;
+
+  // 4. 最佳入袋推荐出杆力度计算
+  function calculateRecommendedPower(cuePos, contactPos, targetBallPos, pocketPos, aimDir, tipOffset, verticalAngle) {
+    const sObj = V.dist(targetBallPos, pocketPos);
+    const sCue = V.dist(cuePos, contactPos);
+    const normal = V.norm(V.sub(targetBallPos, contactPos));
+    const cosCut = clamp(V.dot(aimDir, normal), 0.08, 1);
+    const a = CONFIG.clothRollingDecelMmS2 || 110;
+
+    // 理想进袋速度 250 mm/s
+    const vEnter = 250;
+    const vObjNeeded = Math.sqrt(vEnter * vEnter + 2 * a * sObj);
+    const vCueContactNeeded = vObjNeeded / cosCut;
+    const vCueInitialNeeded = Math.sqrt(vCueContactNeeded * vCueContactNeeded + 2 * a * sCue);
+
+    const retention = tipSpeedRetention(tipOffset);
+    const elevRetention = resolveV3ElevationRetention(verticalAngle);
+    const maxCenterSpeed = CONFIG.maxCuePowerMmS || 7000;
+    const idealPercent = (vCueInitialNeeded / (maxCenterSpeed * retention * elevRetention)) * 100;
+
+    return Math.round(clamp(idealPercent, 2, 100));
+  }
+
+  function predict(state) {
+    const cue = getCueBall(state);
+    if (!cue || cue.potted || !cue.pos) return null;
+
+    const aim = state.aim;
+    if (!aim || !aim.direction) return null;
+    const d = V.norm(aim.direction);
+    if (V.len(d) < 1e-6) return null;
+
+    const objects = activeObjectBalls(state);
+    const allBalls = activeAllBalls(state).map((b) => ({
+      id: b.id,
+      pos: { x: b.pos.x, y: b.pos.y },
+    }));
+    const pockets = readPockets(state);
+    const { boundX, boundY, cushionX, cushionY } = readTableBounds(state);
+    const ap = state.aimPrediction || null;
+    const tip = resolveEffectiveTip(state);
+    const effPower = resolveEffectivePower(state);
+
+    const centerSpeed = resolveCueSpeed(effPower);
+    const retention = tipSpeedRetention(tip);
+    const effSpeed = centerSpeed * retention;
+
+    const result = {
+      cue: { x: cue.pos.x, y: cue.pos.y },
+      aimDir: d,
+      target: null,
+      balls: allBalls,
+      activeBallCount: objects.length,
+      physics: false,
+      shot: {
+        power: effPower,
+        effSpeed,
+      },
+    };
+
+    let geo = null;
+    for (const ball of objects) {
+      const rc = rayContact(cue.pos, d, ball);
+      if (rc && (!geo || rc.tHit < geo.tHit)) geo = { ball, ...rc };
+    }
+
+    const engBall = ap && ap.contactBallId != null
+      ? objects.find((b) => b.id === ap.contactBallId) || null
+      : null;
+
+    const targetBall = engBall || (geo && geo.ball) || null;
+    result.tip = tip;
+    result.power = effPower;
+
+    if (!targetBall) {
+      // 准星未指向任何球时：母球瞄准线直接射向库边
+      // 终点位于距离库边 1 个球半径处 (即 boundX / boundY 处的母球球心位置，而不是直接接触库边)
+      const railHit = rayRailHit(cue.pos, d, boundX, boundY, pockets);
+      const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+
+      if (CONFIG.reboundMethod === 'worker') {
+        const nReb = NativeWorkerBridge.latestRebound;
+        const now = performance.now();
+        const inDir = (nReb && nReb.incomingDirection) ? V.norm(nReb.incomingDirection) : null;
+        const isRebFresh = nReb && nReb.hit && Array.isArray(nReb.path) && nReb.path.length >= 2 &&
+          (now - NativeWorkerBridge.lastReboundTime < 600) &&
+          (!inDir || V.dot(inDir, d) > 0.85);
+
+        if (isRebFresh) {
+          result.noTargetEnd = nReb.path[0];
+          result.cuePost = {
+            cueCushionPaths: [ nReb.path ],
+            restPos: nReb.path[nReb.path.length - 1],
+            nativeWorker: true,
+            method: 'worker',
+          };
+          return result;
+        }
+      }
+
+      // 途径2 (算法无缝移植) 或 途径1 尚未拦截到 Worker 数据时的无缝回退
+      if (railHit) {
+        result.noTargetEnd = railHit.point;
+        result.cuePost = simulateDirectCushionRebound(
+          cue.pos, railHit, d, tip, effPower, vertAngle,
+          boundX, boundY, pockets
+        );
+        if (result.cuePost) {
+          result.cuePost.method = 'algo';
+        }
+      }
+      return result;
+    }
+    if (ap && engBall && ap.hit === false) return result;
+
+    let G;
+    const rcSelf = rayContact(cue.pos, d, targetBall);
+    if (rcSelf) G = rcSelf.G;
+    else if (geo && geo.ball === targetBall) G = geo.G;
+    else return result;
+
+    const apUsable = ap && engBall && ap.hit !== false;
+
+    let n = null;
+    let physics = false;
+    let tp = apUsable && Array.isArray(ap.targetPath) ? ap.targetPath : null;
+    if (!tp) {
+      const nAim = NativeWorkerBridge.latestAim;
+      if (nAim && nAim.hit && Array.isArray(nAim.targetPath) && nAim.targetPath.length >= 2 &&
+          (performance.now() - NativeWorkerBridge.lastAimTime < 600)) {
+        tp = nAim.targetPath;
+      }
+    }
+    if (tp && tp.length >= 2 && tp[0] && tp[1]) {
+      const cand = V.norm(V.sub(tp[1], tp[0]));
+      if (V.len(cand) > 1e-6) { n = cand; physics = true; }
+    }
+    if (!n) n = V.norm(V.sub(targetBall.pos, G));
+    if (V.len(n) < 1e-6) return result;
+
+    const cutAngleDeg = Math.acos(clamp(V.dot(d, n), -1, 1)) * 180 / Math.PI;
+
+    let pocket = null;
+    let engineUsed = false;
+    const autoAimReady = isAutoAimAvailable();
+    for (const pk of pockets) {
+      const ev = evaluatePocket(targetBall.pos, n, pk);
+      if (!ev) continue;
+      if (CONFIG.checkBlock &&
+        pathBlocked(targetBall.pos, ev.enterPoint, objects, targetBall.id, state.cueBallId)) continue;
+      const cand = { ...pk, ...ev, dist: Math.abs(ev.tan) };
+      if (autoAimReady) {
+        const route = queryEngineRoute(state, cue, targetBall, pk.id);
+        if (route) {
+          engineUsed = true;
+          if (route.blocked) continue;
+          if (route.hitRate != null) cand.confidence = clamp(route.hitRate * ev.alignConf, 0, 1);
+          if (route.angleDeg != null) cand.angleDeg = route.angleDeg;
+          cand.engine = true;
+        }
+      }
+      if (!pocket || ev.s < pocket.s) pocket = cand;
+    }
+    result.engineUsed = engineUsed;
+
+    // 目标球方向：严格对齐 147master 原生 ThreeLineAssistRenderer 几何/物理轴向 (完全移除人为偏角扰动)
+    // 优先采用原生引擎预计算的 targetPath，若无则严格使用质心连心线几何法向 (targetBall.pos - G)
+    let objectEnd = null;
+    let reboundSegments = null;
+    if (pocket) {
+      objectEnd = pocket.enterPoint;
+    } else {
+      // 绿色目标球瞄准线：碰撞判定边界直接采用真实库木物理内边边界 (cushionX: ±1784.35, cushionY: ±889.0)
+      // 让绿色射线在 3D 空间中精确扎入库木内沿停住，贴满库边且无缝隙残留
+      const railHit = rayRailHit(targetBall.pos, n, cushionX, cushionY, pockets);
+      const blockBall = CONFIG.checkBlock
+        ? rayFirstBall(targetBall.pos, n, objects, new Set([targetBall.id, state.cueBallId]))
+        : null;
+
+      if (blockBall && (!railHit || blockBall.tHit <= railHit.t)) {
+        objectEnd = blockBall.G;
+      } else if (railHit) {
+        objectEnd = railHit.point;
+        // 【真实物理反弹】：计算目标球受击后的速度、自旋与吃库反弹折线
+        if (CONFIG.showCushionRebound) {
+          const cosCut = clamp(V.dot(d, n), 0.05, 1);
+          const initialPower = aim && Number(aim.power) > 2 ? Number(aim.power) : 50;
+          const refSpeed = resolveCueSpeed(initialPower) * retention;
+          const vObj = refSpeed * cosCut;
+          const objVel = { x: n.x * vObj, y: n.y * vObj };
+          const cutCross = d.x * n.y - d.y * n.x;
+          const objOmega = {
+            x: -n.y * (vObj / BALL_RADIUS_MM),
+            y: n.x * (vObj / BALL_RADIUS_MM),
+            z: -Math.sign(cutCross || 0) * (vObj / BALL_RADIUS_MM) * (CONFIG.throwFrictionCoef || 0.038) * 2.5,
+          };
+          reboundSegments = tracePhysicsRailReflections(
+            targetBall.pos, objVel, objOmega, cushionX, cushionY, pockets, CONFIG.maxRebounds || 2
+          );
+        }
+      } else {
+        objectEnd = V.add(targetBall.pos, V.scale(n, 2000));
+      }
+    }
+
+    // 若原生引擎已预计算 targetPath (包含物理轨迹点序列)，直接采用原生路径；若未进袋且碰库，确保末端延伸至真实库内边
+    let verts = [targetBall.pos, objectEnd];
+    if (tp && tp.length >= 2) {
+      verts = tp.slice();
+      if (!pocket && objectEnd) {
+        verts[verts.length - 1] = objectEnd;
+      }
+    }
+    result.physics = physics;
+    result.target = {
+      ball: targetBall,
+      contact: G,
+      objectDir: n,
+      cutAngleDeg,
+      pocket,
+      objectPath: verts,
+      objectEnd,
+      reboundSegments,
+      pathLengthMm: polylineLength(verts),
+      source: physics ? 'engine' : 'geometry',
+    };
+
+    // 用户已要求删除母球分离走位线，且击打目标球时不显示吃库反弹折线
+    result.cuePost = null;
+    return result;
+  }
+
+  function attachShotPowerMetrics(geomPred, state) {
+    if (!geomPred) return null;
+    const power = resolveEffectivePower(state);
+    const tip = resolveEffectiveTip(state);
+    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+
+    const centerSpeed = resolveCueSpeed(power);
+    const retention = tipSpeedRetention(tip);
+    const elevRetention = resolveV3ElevationRetention(vertAngle);
+    const effSpeed = centerSpeed * retention * elevRetention;
+
+    let insufficientPower = false;
+    let recPower = null;
+
+    if (geomPred.target && geomPred.target.pocket) {
+      if (power > 2) {
+        const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
+        const vObj = effSpeed * cosCut;
+        const maxReachMm = (vObj * vObj) / (2 * CONFIG.clothRollingDecelMmS2);
+        if (maxReachMm < (geomPred.target.pathLengthMm || 0) * 0.92) {
+          insufficientPower = true;
+        }
+      }
+
+      if (CONFIG.showRecPower) {
+        recPower = calculateRecommendedPower(
+          geomPred.cue,
+          geomPred.target.contact,
+          geomPred.target.ball.pos,
+          geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening,
+          geomPred.aimDir,
+          tip,
+          vertAngle
+        );
+      }
+    }
+
+    return {
+      ...geomPred,
+      power,
+      effSpeed,
+      insufficientPower,
+      recPower,
+      roomMode: detectCurrentRoomMode(state),
+    };
+  }
+
+  /* ================================================================== */
+  /* 3D 台面平铺投影（局部参考点归一化，防止近距离镜头推近时法向符号翻转）   */
+  /* ================================================================== */
+
+  const projection = {
+    source: 'none',
+    _internalRef: null,
+    homography: null,
+    canvas: null,
+    _initialized: false,
+    _clothCache: null,
+    _clothCamKey: null,
+
+    init() {
+      const current = this.canvas;
+      const currentUsable = isCanvasActuallyVisible(current);
+
+      const next = findGameCanvas();
+      if (!next && !currentUsable) {
+        this.canvas = null;
+        this._initialized = false;
+        return;
+      }
+      const target = next || current;
+      if (target === current && this._initialized) return;
+
+      this.canvas = target;
+      this._initialized = true;
+      this._clothCache = null;
+      this._clothCamKey = null;
+      this.loadHomography();
+      if (_resizeObserver) {
+        try { _resizeObserver.disconnect(); } catch (_) {}
+        _resizeObserver = null;
+      }
+      _installResizeObserver(target);
+      _sizesDirty = true;
+      _lastRenderKey = null;
+    },
+
+    threeGameProject() {
+      const tg = getGameGlobal('threeGame');
+      return tg && typeof tg.project === 'function' ? tg.project : null;
+    },
+
+    get internal() {
+      if (this._internalRef) {
+        const obj = this._internalRef.deref();
+        if (obj) return obj;
+        this._internalRef = null;
+      }
+      return null;
+    },
+    set internal(val) {
+      this._internalRef = val ? new WeakRef(val) : null;
+    },
+
+    findInternalTransform(root, depth, seen) {
+      if (!root || (depth || 0) > 4 || typeof root !== 'object') return null;
+      if (!seen) seen = new Set();
+      if (seen.has(root)) return null;
+      seen.add(root);
+      if (typeof root.toScreen === 'function') return root;
+      for (const key of Object.keys(root)) {
+        let val;
+        try { val = root[key]; } catch (_) { continue; }
+        if (val && typeof val === 'object') {
+          const found = this.findInternalTransform(val, (depth || 0) + 1, seen);
+          if (found) return found;
+        }
+      }
+      return null;
+    },
+
+    _lastScan: 0,
+    refreshInternal() {
+      if (this.internal) return;
+      const now = performance.now();
+      if (now - this._lastScan < 2000) return;
+      this._lastScan = now;
+      const wins = collectCandidateWindows();
+      const candidates = [capturedCore];
+      for (const w of wins) {
+        try {
+          candidates.push(w.SnookerProduct, w.SnookerProductLite, w.SnookerThreeCore);
+        } catch (_) {}
+      }
+      for (const c of candidates) {
+        const t = this.findInternalTransform(c);
+        if (t) {
+          this.internal = t;
+          return;
+        }
+      }
+    },
+
+    resolveSource() {
+      if (this.threeGameProject()) return 'threeGame';
+      this.refreshInternal();
+      if (this.internal) return 'internal';
+      if (this.homography) return 'homography';
+      return 'none';
+    },
+
+    loadHomography() {
+      try {
+        const raw = localStorage.getItem(CONFIG.calibrationKey);
+        if (raw) this.homography = JSON.parse(raw);
+      } catch (_) { this.homography = null; }
+    },
+
+    saveHomography(H) {
+      this.homography = H;
+      this._clothCache = null;
+      this._clothCamKey = null;
+      _lastRenderKey = null;
+      try { localStorage.setItem(CONFIG.calibrationKey, JSON.stringify(H)); } catch (_) {}
+    },
+
+    toScreen(p) {
+      const tgp = this.threeGameProject();
+      if (tgp) {
+        try { return tgp({ x: p.x, y: p.y }); } catch (_) {}
+      }
+      const intl = this.internal;
+      if (intl) {
+        const s = intl.toScreen({ x: p.x, y: p.y });
+        return { x: s.x, y: s.y };
+      }
+      if (this.homography) return this.applyHomography(p);
+      return null;
+    },
+
+    computeClothProjector(refPos) {
+      const rect = this.canvas ? this.canvas.getBoundingClientRect() : null;
+      const winW = rect ? rect.width : window.innerWidth;
+      const winH = rect ? rect.height : window.innerHeight;
+      const cx = rect ? (rect.left + winW * 0.5) : (winW * 0.5);
+      const cy = rect ? (rect.top + winH * 0.5) : (winH * 0.5);
+
+      const ref = refPos && Number.isFinite(refPos.x) && Number.isFinite(refPos.y)
+        ? { x: refPos.x, y: refPos.y }
+        : { x: 0, y: 0 };
+
+      const span = 350;
+      const localPts = [
+        { x: -span, y: -span },
+        { x: span, y: -span },
+        { x: span, y: span },
+        { x: -span, y: span },
+      ];
+      const worldPts = localPts.map((lp) => ({ x: ref.x + lp.x, y: ref.y + lp.y }));
+      const sPts = worldPts.map((wp) => this.toScreen(wp));
+      if (sPts.some((s) => !s || !Number.isFinite(s.x) || !Number.isFinite(s.y))) {
+        return null;
+      }
+
+      const H = computeHomography(localPts, sPts);
+      if (!H) return null;
+
+      const a1 = H[0] - cx * H[6];
+      const b1 = H[3] - cy * H[6];
+      const c1 = H[6];
+
+      const a2 = H[1] - cx * H[7];
+      const b2 = H[4] - cy * H[7];
+      const c2 = H[7];
+
+      const m1 = -(a1 * a2 + b1 * b2);
+      const d1 = c1 * c2;
+      const m2 = 0.5 * ((a1 * a1 + b1 * b1) - (a2 * a2 + b2 * b2));
+      const d2 = 0.5 * (c2 * c2 - c1 * c1);
+      const denom = d1 * d1 + d2 * d2;
+
+      const defaultF = Math.max(600, winW * 0.92);
+      let f = defaultF;
+      if (denom > 1e-13) {
+        const f2 = (m1 * d1 + m2 * d2) / denom;
+        if (f2 > 0) {
+          const minF = Math.max(250, winW * 0.35);
+          const maxF = Math.max(2000, winW * 4.0);
+          f = clamp(Math.sqrt(f2), minF, maxF);
+        }
+      }
+
+      const u1 = [a1 / f, b1 / f, c1];
+      const u2 = [a2 / f, b2 / f, c2];
+      const l1 = Math.hypot(u1[0], u1[1], u1[2]);
+      const l2 = Math.hypot(u2[0], u2[1], u2[2]);
+      if (l1 < 1e-9 || l2 < 1e-9) return null;
+
+      const lambda = (l1 + l2) * 0.5;
+      const r1 = [u1[0] / l1, u1[1] / l1, u1[2] / l1];
+      const dot12 = u2[0] * r1[0] + u2[1] * r1[1] + u2[2] * r1[2];
+      const r2Raw = [u2[0] - dot12 * r1[0], u2[1] - dot12 * r1[1], u2[2] - dot12 * r1[2]];
+      const l2Ortho = Math.hypot(r2Raw[0], r2Raw[1], r2Raw[2]) || 1;
+      const r2 = [r2Raw[0] / l2Ortho, r2Raw[1] / l2Ortho, r2Raw[2] / l2Ortho];
+
+      const r3 = [
+        r1[1] * r2[2] - r1[2] * r2[1],
+        r1[2] * r2[0] - r1[0] * r2[2],
+        r1[0] * r2[1] - r1[1] * r2[0],
+      ];
+
+      const s = lambda * BALL_RADIUS_MM;
+      const dX = f * s * r3[0];
+      const dY = f * s * r3[1];
+      const dZ = s * r3[2];
+
+      return {
+        ref,
+        H,
+        cx,
+        cy,
+        dX,
+        dY,
+        dZ,
+      };
+    },
+
+    toClothScreen(p, refPos) {
+      if (!CONFIG.flatOnCloth) return this.toScreen(p);
+      const tgp = this.threeGameProject();
+      if (tgp) {
+        try {
+          // 147master 原生 project(p2, height = 0.02625):
+          // 传递 height = 0 时直接投影到台呢表面 (与原生 aimPlane 瞄准线完全像素级一致)
+          const s = tgp({ x: p.x, y: p.y }, 0);
+          if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) return s;
+        } catch (_) {}
+      }
+      return this.toScreen(p);
+    },
+
+    radius(mm, ref) {
+      const base = ref || { x: 0, y: 0 };
+      if (this.source === 'threeGame') {
+        const tgp = this.threeGameProject();
+        if (tgp) {
+          const a = tgp(base);
+          const b = tgp({ x: base.x + mm, y: base.y });
+          return Math.max(2, Math.hypot(b.x - a.x, b.y - a.y));
+        }
+      }
+      const intl = this.internal;
+      if (intl && typeof intl.radius === 'function') {
+        return intl.radius(mm);
+      }
+      if (intl) {
+        const a = intl.toScreen(base);
+        const b = intl.toScreen({ x: base.x + mm, y: base.y });
+        return Math.max(2, Math.hypot(b.x - a.x, b.y - a.y));
+      }
+      if (this.homography) {
+        const a = this.applyHomography(base);
+        const b = this.applyHomography({ x: base.x + mm, y: base.y });
+        return Math.max(2, Math.hypot(b.x - a.x, b.y - a.y));
+      }
+      return 3;
+    },
+
+    applyHomography(p) {
+      const H = this.homography;
+      const w = H[6] * p.x + H[7] * p.y + H[8];
+      return {
+        x: (H[0] * p.x + H[1] * p.y + H[2]) / w,
+        y: (H[3] * p.x + H[4] * p.y + H[5]) / w,
+      };
+    },
+  };
+
+  /* ================================================================== */
+  /* 单应矩阵求解                                                      */
+  /* ================================================================== */
+
+  function computeHomography(mmPts, pxPts) {
+    const n = mmPts.length;
+    if (n < 4) return null;
+    const A = [];
+    const b = [];
+    for (let i = 0; i < n; i++) {
+      const [x, y] = [mmPts[i].x, mmPts[i].y];
+      const [u, v] = [pxPts[i].x, pxPts[i].y];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = solveLinear(A, b);
+    if (!h) return null;
+    return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+  }
+
+  function solveLinear(A, b) {
+    const m = A.length, n = A[0].length;
+    const M = A.map((row, i) => [...row, b[i]]);
+    for (let col = 0; col < n; col++) {
+      let piv = col;
+      for (let r = col + 1; r < m; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+      if (Math.abs(M[piv][col]) < 1e-9) return null;
+      [M[col], M[piv]] = [M[piv], M[col]];
+      for (let r = 0; r < m; r++) {
+        if (r === col) continue;
+        const f = M[r][col] / M[col][col];
+        for (let c = col; c <= n; c++) M[r][c] -= f * M[col][c];
+      }
+    }
+    const x = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) x[i] = M[i][n] / M[i][i];
+    return x;
+  }
+
+  /* ================================================================== */
+  /* ResizeObserver 尺寸同步                                            */
+  /* ================================================================== */
+
+  let _sizesDirty = true;
+  let _resizeObserver = null;
+  let _resizeListenersBound = false;
+
+  function _installResizeObserver(sceneCanvas) {
+    if (_resizeObserver || !sceneCanvas) return;
+    try {
+      _resizeObserver = new ResizeObserver(() => {
+        _sizesDirty = true;
+        _lastRenderKey = null;
+      });
+      _resizeObserver.observe(sceneCanvas);
+    } catch (_) {}
+    if (!_resizeListenersBound) {
+      _resizeListenersBound = true;
+      window.addEventListener('resize', () => {
+        _sizesDirty = true;
+        _lastRenderKey = null;
+      }, { passive: true });
+      document.addEventListener('fullscreenchange', () => {
+        _sizesDirty = true;
+        _lastRenderKey = null;
+      });
+    }
+  }
+
+  /* ================================================================== */
+  /* 状态指纹脏检测                                                      */
+  /* ================================================================== */
+
+  let _lastGeomKey = null;
+  let _lastGeomPred = null;
+  let _lastRenderKey = null;
+  let _lastFullPred = null;
+  let _lastConfigVersion = -1;
+
+  function buildStateKeys(state) {
+    if (!state) return null;
+    const cue = getCueBall(state);
+    const aim = state && state.aim;
+    if (!cue || !cue.pos || !aim || !aim.direction) return null;
+    const balls = Array.isArray(state.balls) ? state.balls : [];
+    const active = balls.filter((b) => b && !b.potted && b.pos && Number.isFinite(b.pos.x));
+    const ballPositions = active
+      .map((b) => `${b.id != null ? b.id : b.kind || '?'}:${b.pos.x.toFixed(1)},${b.pos.y.toFixed(1)}`)
+      .join('|');
+    const contactId = (state.aimPrediction && state.aimPrediction.contactBallId) || '';
+    const apHit = state.aimPrediction && state.aimPrediction.hit === false ? '0' : '1';
+    const phase = String(state.phase || state.status || state.gameState || state.state || '');
+
+    let camSig = 'nocam';
+    const tg = getGameGlobal('threeGame');
+    const cam = (tg && tg.camera) || (tg && tg.core && tg.core.camera);
+    if (cam && cam.matrixWorld) {
+      const e = cam.matrixWorld.elements;
+      camSig = `${e[0].toFixed(2)},${e[5].toFixed(2)},${e[10].toFixed(2)},${e[12].toFixed(1)},${e[13].toFixed(1)},${e[14].toFixed(1)}`;
+    } else {
+      const sCue = projection.toScreen(cue.pos);
+      const sCenter = projection.toScreen({ x: 0, y: 0 });
+      camSig = (sCue && sCenter) ? `${sCue.x.toFixed(1)},${sCue.y.toFixed(1)},${sCenter.x.toFixed(1)},${sCenter.y.toFixed(1)}` : 'nocam';
+    }
+
+    const effTip = resolveEffectiveTip(state);
+    const effPower = resolveEffectivePower(state);
+    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+
+    const geomKey = [
+      cue.pos.x.toFixed(1), cue.pos.y.toFixed(1),
+      aim.direction.x.toFixed(4), aim.direction.y.toFixed(4),
+      effTip.x.toFixed(3), effTip.y.toFixed(3),
+      effPower.toFixed(1),
+      vertAngle.toFixed(1),
+      active.length, ballPositions, contactId, apHit, phase,
+    ].join(',');
+
+    const renderKey = `${geomKey}|p:${effPower.toFixed(1)}|c:${camSig}`;
+
+    return { geomKey, renderKey };
+  }
+
+  /* ================================================================== */
+  /* overlay 画布与高清渲染层                                            */
+  /* ================================================================== */
+
+  const overlay = {
+    canvas: null,
+    ctx: null,
+    dpr: 1,
+    rect: null,
+    debug: { source: 'none', balls: 0, target: '-', pocket: '-', ready: false },
+    _created: false,
+
+    getTargetDoc() {
+      if (projection.canvas && projection.canvas.ownerDocument) {
+        return projection.canvas.ownerDocument;
+      }
+      return document;
+    },
+
+    destroy() {
+      if (this.canvas) {
+        try { this.canvas.remove(); } catch (_) {}
+      }
+      this.canvas = null;
+      this.ctx = null;
+      this.rect = null;
+      this._created = false;
+      _lastRenderKey = null;
+    },
+
+    ensure() {
+      const targetDoc = this.getTargetDoc();
+      if (!targetDoc || !targetDoc.body) return;
+
+      if (targetDoc !== document && targetDoc.__snookerAimFrameManaged) {
+        if (this.canvas) this.destroy();
+        return;
+      }
+
+      if (this._created && this.canvas && this.canvas.isConnected && this.canvas.ownerDocument === targetDoc) {
+        const all = targetDoc.querySelectorAll('#snooker-aim-overlay');
+        if (all.length > 1) {
+          all.forEach((el) => { if (el !== this.canvas) el.remove(); });
+        }
+        return;
+      }
+
+      targetDoc.querySelectorAll('#snooker-aim-overlay').forEach((el) => el.remove());
+      this._created = false;
+      const c = targetDoc.createElement('canvas');
+      c.id = 'snooker-aim-overlay';
+      c.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;';
+      targetDoc.body.appendChild(c);
+      this.canvas = c;
+      this.ctx = c.getContext('2d');
+      this.rect = null;
+      const targetWin = targetDoc.defaultView || window;
+      this.dpr = targetWin.devicePixelRatio || 1;
+      this._created = true;
+      _sizesDirty = true;
+      _lastRenderKey = null;
+    },
+
+    syncSize() {
+      if (!this.canvas) return;
+      const scene = projection.canvas;
+      if (!scene || !scene.isConnected) return;
+      const rect = scene.getBoundingClientRect();
+      const targetWin = (scene.ownerDocument && scene.ownerDocument.defaultView) || window;
+      const dpr = targetWin.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      const prev = this.rect;
+      const unchanged = Boolean(
+        prev && this.dpr === dpr &&
+        Math.abs(prev.left - rect.left) < 0.5 &&
+        Math.abs(prev.top - rect.top) < 0.5 &&
+        Math.abs(prev.width - rect.width) < 0.5 &&
+        Math.abs(prev.height - rect.height) < 0.5 &&
+        this.canvas.width === width && this.canvas.height === height
+      );
+      if (unchanged) return;
+
+      this.dpr = dpr;
+      this.rect = rect;
+      this.canvas.style.left = rect.left + 'px';
+      this.canvas.style.top = rect.top + 'px';
+      this.canvas.style.width = rect.width + 'px';
+      this.canvas.style.height = rect.height + 'px';
+      this.canvas.width = width;
+      this.canvas.height = height;
+      projection._clothCache = null;
+      _sizesDirty = true;
+      _lastRenderKey = null;
+    },
+
+    clear() {
+      if (!this.ctx || !this.canvas) return;
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      const dpr = this.dpr || 1;
+      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    },
+
+    localCloth(p, refPos) {
+      const s = projection.toClothScreen(p, refPos);
+      if (!s) return null;
+      if (projection.source === 'homography') return s;
+      if (!this.rect) return s;
+      return { x: s.x - this.rect.left, y: s.y - this.rect.top };
+    },
+
+    localScreen(p) {
+      const s = projection.toScreen(p);
+      if (!s) return null;
+      if (projection.source === 'homography') return s;
+      if (!this.rect) return s;
+      return { x: s.x - this.rect.left, y: s.y - this.rect.top };
+    },
+
+    getBallScreenCircle(ballPos) {
+      if (!ballPos) return null;
+      const center = this.localScreen(ballPos);
+      if (!center) return null;
+
+      let rPx = 0;
+      const dirs = [
+        [1, 0], [-1, 0], [0, 1], [0, -1],
+        [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071],
+      ];
+      for (const [dx, dy] of dirs) {
+        const edge = this.localScreen({
+          x: ballPos.x + dx * BALL_RADIUS_MM,
+          y: ballPos.y + dy * BALL_RADIUS_MM,
+        });
+        if (edge) rPx = Math.max(rPx, Math.hypot(edge.x - center.x, edge.y - center.y));
+      }
+      if (rPx < 2) rPx = projection.radius(BALL_RADIUS_MM, ballPos);
+      rPx = clamp(rPx, 2, 80);
+      return { center, rPx };
+    },
+
+    maskOccludingBalls(balls, segments, ghostPx) {
+      const ctx = this.ctx;
+      if (!ctx || !Array.isArray(balls) || !balls.length) return;
+      if ((!segments || !segments.length) && !ghostPx) return;
+
+      const circles = [];
+      for (const b of balls) {
+        if (!b || !b.pos) continue;
+        const sc = this.getBallScreenCircle(b.pos);
+        if (!sc) continue;
+
+        const pad = sc.rPx + 2.2;
+        let occludes = false;
+
+        if (segments) {
+          for (const [a, e] of segments) {
+            if (distToSegment(sc.center, a, e) <= pad) {
+              occludes = true;
+              break;
+            }
+          }
+        }
+        if (!occludes && ghostPx) {
+          if (Math.hypot(sc.center.x - ghostPx.x, sc.center.y - ghostPx.y) <= sc.rPx * 2 + 2.2) {
+            occludes = true;
+          }
+        }
+        if (occludes) circles.push(sc);
+      }
+
+      if (!circles.length) return;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = '#000';
+      for (const { center, rPx } of circles) {
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, rPx + 0.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    },
+
+    // 绘制白色假想球 (完全复刻游戏原生：3D平铺投影 + 实心白色圆周线圈包裹 + 半透明白填充)
+    drawGhostBall(worldPos, refPos) {
+      const ctx = this.ctx;
+      if (!ctx) return;
+
+      const steps = 36;
+      ctx.save();
+      ctx.fillStyle = CONFIG.ghostBallColor || 'rgba(255, 255, 255, 0.35)';
+      ctx.strokeStyle = CONFIG.ghostBallStrokeColor || '#ffffff';
+      ctx.lineWidth = CONFIG.ghostBallStrokeWidthPx || 1.1;
+      ctx.beginPath();
+      let validPts = 0;
+      for (let i = 0; i < steps; i++) {
+        const theta = (i / steps) * Math.PI * 2;
+        const pt = this.localCloth({
+          x: worldPos.x + BALL_RADIUS_MM * Math.cos(theta),
+          y: worldPos.y + BALL_RADIUS_MM * Math.sin(theta),
+        }, refPos);
+        if (!pt) continue;
+        if (validPts === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+        validPts++;
+      }
+      if (validPts >= 3) {
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke(); // 实心圆周线圈包裹
+      }
+      ctx.restore();
+    },
+
+    // 绘制母球停球点假想球 (淡蓝色实心线圈包裹 + 半透明填充)
+    drawGhostCueBall(worldPos, refPos) {
+      const ctx = this.ctx;
+      if (!ctx) return;
+
+      const steps = 36;
+      ctx.save();
+      ctx.fillStyle = CONFIG.ghostCueBallColor || 'rgba(96, 205, 255, 0.35)';
+      ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#60cdff';
+      ctx.lineWidth = CONFIG.ghostBallStrokeWidthPx || 1.1;
+      ctx.beginPath();
+      let validPts = 0;
+      for (let i = 0; i < steps; i++) {
+        const theta = (i / steps) * Math.PI * 2;
+        const pt = this.localCloth({
+          x: worldPos.x + BALL_RADIUS_MM * Math.cos(theta),
+          y: worldPos.y + BALL_RADIUS_MM * Math.sin(theta),
+        }, refPos);
+        if (!pt) continue;
+        if (validPts === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+        validPts++;
+      }
+      if (validPts >= 3) {
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.restore();
+    },
+
+    drawTopHudPill(text, accentColor) {
+      if (!CONFIG.showHudPill || !text || !this.ctx || !this.canvas) return;
+      const ctx = this.ctx;
+      const canvasW = this.rect ? this.rect.width : (this.canvas.width / (this.dpr || 1));
+      const canvasH = this.rect ? this.rect.height : (this.canvas.height / (this.dpr || 1));
+      const rectLeft = this.rect ? this.rect.left : 0;
+      const rectTop = this.rect ? this.rect.top : 0;
+      const targetWin = (this.canvas.ownerDocument && this.canvas.ownerDocument.defaultView) || window;
+      const winW = targetWin.innerWidth || canvasW;
+
+      ctx.save();
+      // 100% 不透明度显示，字体字号 10px，胶囊高度 20px
+      ctx.globalAlpha = 1.0;
+      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+      const padX = 8;
+      const h = 20;
+      const textW = ctx.measureText(text).width;
+      const w = Math.ceil(textW + padX * 2 + 10);
+
+      const screenCenterX = (winW / 2) - rectLeft;
+      const x = clamp(Math.round(screenCenterX - w / 2), 6, Math.max(6, canvasW - w - 6));
+      const y = clamp(Math.round(11 - rectTop), 6, Math.max(6, canvasH - h - 6));
+
+      ctx.fillStyle = 'rgba(12, 24, 18, 0.88)';
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(x, y, w, h, h / 2);
+      } else {
+        ctx.rect(x, y, w, h);
+      }
+      ctx.fill();
+
+      // 外框颜色与圆点严格跟随 accentColor（虚线圆时为虚线圆的橙色，实线圆时为实线圆的绿色）
+      const pillColor = accentColor || CONFIG.pocketRingColor || '#00ff88';
+      ctx.strokeStyle = pillColor;
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+
+      ctx.fillStyle = pillColor;
+      ctx.beginPath();
+      ctx.arc(x + 9, y + h / 2, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#f2f7f2';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, x + 16, y + h / 2 + 0.5);
+      ctx.restore();
+    },
+
+    /* ---------- 核心瞄准线绘制（返回是否有效绘制，防止投影瞬时失败锁定空帧） ---------- */
+
+    drawPrediction(pred) {
+      const ctx = this.ctx;
+      if (!ctx) return false;
+      this.clear();
+      if (!pred) return false;
+
+      const cueWorld = pred.cue;
+      const aimDir = pred.aimDir;
+      if (!cueWorld || !aimDir) return false;
+
+      const t = pred.target || null;
+
+      const drawnSegments = [];
+      let ghostPx = null;
+      let hasProjected = false;
+
+      // 1) 母球瞄准线：始终显示白色瞄准线 (起点在母球中心，终点在假想球接触点或前方库边)
+      if (CONFIG.showCueLine) {
+        const cuePx = this.localCloth(cueWorld, cueWorld);
+        const contactPx = (t && t.contact) ? this.localCloth(t.contact, cueWorld) : null;
+        if (cuePx) {
+          hasProjected = true;
+          ctx.save();
+          ctx.strokeStyle = CONFIG.cueLineColor;
+          ctx.lineWidth = CONFIG.cueLineWidthPx;
+          ctx.lineCap = 'round';
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(cuePx.x, cuePx.y);
+          if (contactPx) {
+            ctx.lineTo(contactPx.x, contactPx.y);
+          } else if (pred.noTargetEnd) {
+            const endPx = this.localCloth(pred.noTargetEnd, cueWorld);
+            if (endPx) ctx.lineTo(endPx.x, endPx.y);
+          }
+          ctx.stroke();
+          ctx.restore();
+
+          if (contactPx && t && t.contact) {
+            drawnSegments.push([cuePx, contactPx]);
+            // 绘制白色假想球：3D平铺投影 + 实心白色圆周线圈包裹
+            this.drawGhostBall(t.contact, cueWorld);
+            ghostPx = contactPx;
+          } else if (pred.noTargetEnd) {
+            const endPx = this.localCloth(pred.noTargetEnd, cueWorld);
+            if (endPx) {
+              drawnSegments.push([cuePx, endPx]);
+              // 始终显示终点假想球：未击中球时在库边终点处绘制白色假想球
+              this.drawGhostBall(pred.noTargetEnd, cueWorld);
+              ghostPx = endPx;
+            }
+          }
+        }
+      }
+
+      // 2) 目标球延长线：从目标球球心起画 (绿色瞄准线)
+      if (t && CONFIG.showObjectLine && Array.isArray(t.objectPath) && t.objectPath.length >= 2) {
+        const pxPts = t.objectPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
+
+        if (pxPts.length >= 2) {
+          hasProjected = true;
+          ctx.save();
+          ctx.strokeStyle = CONFIG.objectLineColor;
+          ctx.lineWidth = CONFIG.objectLineWidthPx;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(pxPts[0].x, pxPts[0].y);
+          for (let i = 1; i < pxPts.length; i++) {
+            ctx.lineTo(pxPts[i].x, pxPts[i].y);
+            drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px (支持途径1拦截 / 途径2移植)
+      if (CONFIG.showCushionRebound && pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) && pred.cuePost.cueCushionPaths.length > 0) {
+        const cPath = pred.cuePost.cueCushionPaths[0];
+        if (Array.isArray(cPath) && cPath.length >= 2) {
+          const pxPts = cPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
+          if (pxPts.length >= 2) {
+            hasProjected = true;
+            ctx.save();
+            ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff'; // '#86cfff' 天蓝色
+            ctx.lineWidth = CONFIG.cueCushionReboundWidthPx || 1.6;     // 1.6px (与绿色瞄准线一致)
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.setLineDash([]); // 实线显示
+            ctx.beginPath();
+            ctx.moveTo(pxPts[0].x, pxPts[0].y);
+            for (let i = 1; i < pxPts.length; i++) {
+              ctx.lineTo(pxPts[i].x, pxPts[i].y);
+              drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+            }
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+      }
+
+      // 3.2) 【目标球吃库反弹折线】：未进袋时撞库反弹 (天蓝色 #86cfff 实线)
+      if (CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
+        for (const seg of t.reboundSegments) {
+          if (!seg || !seg.p1 || !seg.p2) continue;
+          const px1 = this.localCloth(seg.p1, cueWorld);
+          const px2 = this.localCloth(seg.p2, cueWorld);
+          if (px1 && px2) {
+            hasProjected = true;
+            ctx.save();
+            ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff';
+            ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(px1.x, px1.y);
+            ctx.lineTo(px2.x, px2.y);
+            ctx.stroke();
+            ctx.restore();
+            drawnSegments.push([px1, px2]);
+          }
+        }
+      }
+
+      if ((CONFIG.showCueLine || CONFIG.showObjectLine) && !hasProjected) {
+        return false;
+      }
+
+      // 4) 反向擦除所有遮挡瞄准线的球体 3D 投影区域
+      const allBalls = Array.isArray(pred.balls) && pred.balls.length
+        ? pred.balls
+        : [{ pos: cueWorld }, t && t.ball && t.ball.pos ? { pos: t.ball.pos } : null].filter(Boolean);
+      this.maskOccludingBalls(allBalls, drawnSegments, ghostPx);
+
+      // 5) 屏幕正上方切角与出杆状态信息浮标 (实时显示出杆加塞与力度，外框颜色动态变化)
+      if (CONFIG.showHudPill) {
+        const effPower = Math.round(Number(pred.shot?.power ?? pred.power ?? 50));
+        const tipText = formatTipEnglish(pred.tip || (pred.shot && pred.shot.tip));
+
+        if (t && t.pocket) {
+          const cutDeg = Math.round(t.cutAngleDeg || 0);
+          const isUnderpowered = Boolean(pred.insufficientPower);
+          const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
+          const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
+          const hudRingColor = solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33');
+          this.drawTopHudPill(
+            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}`,
+            hudRingColor
+          );
+        } else if (t && t.ball) {
+          const cutDeg = Math.round(t.cutAngleDeg || 0);
+          this.drawTopHudPill(
+            `${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}`,
+            'rgba(255, 255, 255, 0.75)'
+          );
+        } else if (pred.noTargetEnd) {
+          const methodLabel = (CONFIG.reboundMethod === 'worker' && pred.cuePost?.method === 'worker')
+            ? '途径1:拦截'
+            : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植');
+          this.drawTopHudPill(
+            `直吃库 (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
+            '#86cfff'
+          );
+        }
+      }
+
+      return true;
+    },
+  };
+
+  /* ================================================================== */
+  /* 控制面板 UI                                                         */
+  /* ================================================================== */
+
+  const ui = {
+    panel: null,
+    body: null,
+    headerEl: null,
+    titleEl: null,
+    toggleBtn: null,
+    debugLine: null,
+    collapsed: true,
+    circleHidden: false,
+    _built: false,
+    _checkboxes: {},
+    _suppressClickUntil: 0,
+
+    handlePlusClick() {
+      if (performance.now() < this._suppressClickUntil) return;
+      this.setCollapsed(false);
+    },
+
+    loadCircleHidden() {
+      try {
+        return localStorage.getItem(CONFIG.panelCircleHiddenKey) === '1';
+      } catch (_) {
+        return false;
+      }
+    },
+
+    saveCircleHidden(hidden) {
+      this.circleHidden = Boolean(hidden);
+      try {
+        localStorage.setItem(CONFIG.panelCircleHiddenKey, this.circleHidden ? '1' : '0');
+      } catch (_) {}
+    },
+
+    toggleCircleHidden() {
+      const next = !this.circleHidden;
+      this.setCircleHidden(next);
+      if (next) {
+        showToast('🙈 控制面板加号已隐藏 (三击屏幕重新显示)', 1800);
+      } else {
+        showToast('👁️ 控制面板加号已显示', 1500);
+      }
+      return this.circleHidden;
+    },
+
+    setCircleHidden(hidden) {
+      this.saveCircleHidden(hidden);
+      if (this.circleHidden) {
+        this.collapsed = true;
+      }
+      if (!this.panel) return;
+      if (this.circleHidden) {
+        this.panel.style.setProperty('display', 'none', 'important');
+      } else {
+        this.panel.style.removeProperty('display');
+        this.setCollapsed(true);
+      }
+    },
+
+    _circlePos: { left: 0, top: 0 },
+    _circlePosInitialized: false,
+
+    loadPanelPos() {
+      try {
+        const raw = localStorage.getItem(CONFIG.panelPosKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && Number.isFinite(parsed.left) && Number.isFinite(parsed.top)) {
+            return parsed;
+          }
+        }
+      } catch (_) {}
+      return null;
+    },
+
+    saveCirclePos(left, top) {
+      this._circlePos = { left, top };
+      try {
+        localStorage.setItem(CONFIG.panelPosKey, JSON.stringify({ left, top }));
+      } catch (_) {}
+    },
+
+    savePanelPos(left, top) {
+      this.saveCirclePos(left, top);
+    },
+
+    clampPanelIntoViewport() {
+      if (!this.panel || !this.panel.isConnected) return;
+      if (this.circleHidden) {
+        this.panel.style.setProperty('display', 'none', 'important');
+        return;
+      }
+      const vv = window.visualViewport;
+      const winW = (vv && vv.width) || window.innerWidth || document.documentElement.clientWidth || 1920;
+      const winH = (vv && vv.height) || window.innerHeight || document.documentElement.clientHeight || 1080;
+
+      if (this.collapsed) {
+        if (!this._circlePos) return;
+        const safeLeft = clamp(this._circlePos.left, 0, Math.max(0, winW - 21));
+        const safeTop = clamp(this._circlePos.top, 0, Math.max(0, winH - 21));
+        this._circlePos.left = safeLeft;
+        this._circlePos.top = safeTop;
+        this.panel.style.left = Math.round(safeLeft) + 'px';
+        this.panel.style.top = Math.round(safeTop) + 'px';
+        this.panel.style.right = 'auto';
+        this.panel.style.bottom = 'auto';
+      } else {
+        const pW = this.panel.offsetWidth || 300;
+        const pH = this.panel.offsetHeight || 280;
+        const anchorLeft = (this._circlePos && Number.isFinite(this._circlePos.left)) ? this._circlePos.left : (this.panel.offsetLeft || 14);
+        const anchorTop = (this._circlePos && Number.isFinite(this._circlePos.top)) ? this._circlePos.top : (this.panel.offsetTop || 14);
+        const displayLeft = Math.max(4, Math.min(anchorLeft, winW - pW - 4));
+        const displayTop = Math.max(4, Math.min(anchorTop, winH - pH - 4));
+        this.panel.style.left = Math.round(displayLeft) + 'px';
+        this.panel.style.top = Math.round(displayTop) + 'px';
+        this.panel.style.right = 'auto';
+        this.panel.style.bottom = 'auto';
+      }
+    },
+
+    setDragVisual(active) {
+      if (!this.panel) return;
+      if (active) {
+        this.panel.style.cursor = 'grabbing';
+        this.panel.style.setProperty(
+          'box-shadow',
+          '0 8px 30px rgba(0, 255, 136, 0.45), 0 0 0 2.5px #00ff88',
+          'important'
+        );
+      } else {
+        this.panel.style.cursor = this.collapsed ? 'pointer' : 'default';
+        if (this.collapsed) {
+          this.panel.style.setProperty(
+            'box-shadow',
+            '0 4px 14px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.25)',
+            'important'
+          );
+        } else {
+          this.panel.style.setProperty(
+            'box-shadow',
+            '0 6px 22px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.10)',
+            'important'
+          );
+        }
+      }
+    },
+
+    ensure() {
+      if (this._built && this.panel && this.panel.isConnected) {
+        if (this.circleHidden) {
+          this.panel.style.setProperty('display', 'none', 'important');
+        }
+        return;
+      }
+      this.circleHidden = this.loadCircleHidden();
+      this._built = false;
+      this._suppressClickUntil = 0;
+      this.panel = null;
+      this.body = null;
+      this.headerEl = null;
+      this.titleEl = null;
+      this.toggleBtn = null;
+      this.debugLine = null;
+      this._checkboxes = {};
+
+      try {
+        if (typeof document !== 'undefined') {
+          let style = document.getElementById('snooker-scrollbar-style');
+          if (!style) {
+            style = document.createElement('style');
+            style.id = 'snooker-scrollbar-style';
+            (document.head || document.body || document.documentElement).appendChild(style);
+          }
+          style.textContent = `
+            #snooker-aim-panel::-webkit-scrollbar,
+            #snooker-panel-body::-webkit-scrollbar {
+              display: none !important;
+              width: 0 !important;
+              height: 0 !important;
+            }
+            #snooker-aim-panel,
+            #snooker-panel-body {
+              -ms-overflow-style: none !important;
+              scrollbar-width: none !important;
+            }
+          `;
+        }
+      } catch (_) {}
+
+      this.build();
+    },
+
+    build() {
+      if (this._built && this.panel && this.panel.isConnected) return;
+      this._built = false;
+      document.querySelectorAll('#snooker-aim-panel').forEach((el) => el.remove());
+
+      this.panel = document.createElement('div');
+      this.panel.id = 'snooker-aim-panel';
+      this.panel.style.cssText = [
+        'position: fixed !important;',
+        'z-index: 2147483647 !important;',
+        'box-sizing: border-box !important;',
+        'color: #f0f4ee !important;',
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif !important;',
+        'font-size: 13px !important;',
+        'line-height: 1.5 !important;',
+        'pointer-events: auto !important;',
+        'user-select: none !important;',
+        '-webkit-user-select: none !important;',
+        'text-align: left !important;',
+      ].join(' ');
+
+      const vv = window.visualViewport;
+      const winW = (vv && vv.width) || window.innerWidth || document.documentElement.clientWidth || 800;
+      const winH = (vv && vv.height) || window.innerHeight || document.documentElement.clientHeight || 600;
+
+      if (!this._circlePosInitialized) {
+        const savedPos = this.loadPanelPos();
+        if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) {
+          this._circlePos = {
+            left: clamp(savedPos.left, 0, Math.max(0, winW - 21)),
+            top: clamp(savedPos.top, 0, Math.max(0, winH - 21)),
+          };
+        } else {
+          this._circlePos = {
+            left: Math.max(8, winW - 35),
+            top: 14,
+          };
+        }
+        this._circlePosInitialized = true;
+      }
+      this.panel.style.left = this._circlePos.left + 'px';
+      this.panel.style.top = this._circlePos.top + 'px';
+      this.panel.style.right = 'auto';
+      this.panel.style.bottom = 'auto';
+
+      this.bindDragEvents();
+
+      const header = document.createElement('div');
+      header.style.cssText = [
+        'display: flex !important;',
+        'align-items: center !important;',
+        'justify-content: space-between !important;',
+        'gap: 8px !important;',
+        'width: 100% !important;',
+        'height: 22px !important;',
+        'cursor: default !important;',
+        'box-sizing: border-box !important;',
+      ].join(' ');
+      this.headerEl = header;
+
+      const title = document.createElement('span');
+      title.textContent = '斯诺克瞄准·辅助';
+      title.title = '控制面板';
+      title.style.cssText = [
+        'font-weight: 600 !important;',
+        'font-size: 13px !important;',
+        'color: #f0f4ee !important;',
+        'letter-spacing: 0.5px !important;',
+        'white-space: nowrap !important;',
+        'user-select: none !important;',
+      ].join(' ');
+      this.titleEl = title;
+
+      this.toggleBtn = document.createElement('button');
+      this.toggleBtn.type = 'button';
+      this.toggleBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (performance.now() < this._suppressClickUntil) return;
+        if (!this.collapsed) {
+          this.setCollapsed(true);
+        } else {
+          this.setCollapsed(false);
+        }
+      };
+      header.append(title, this.toggleBtn);
+      this.panel.appendChild(header);
+
+      this.panel.addEventListener('click', (e) => {
+        if (performance.now() < this._suppressClickUntil) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+        if (this.collapsed) {
+          e.stopPropagation();
+          this.setCollapsed(false);
+        }
+      });
+
+      this.body = document.createElement('div');
+      this.body.id = 'snooker-panel-body';
+      this.body.style.cssText = [
+        'margin-top: 6px !important;',
+        'width: 100% !important;',
+        'flex: 1 1 auto !important;',
+        'min-height: 0 !important;',
+        'overflow-y: auto !important;',
+        'overflow-x: hidden !important;',
+        'padding-right: 12px !important;',
+        'box-sizing: border-box !important;',
+        'touch-action: pan-y !important;',
+        '-webkit-overflow-scrolling: touch !important;',
+        'overscroll-behavior: contain !important;',
+      ].join(' ');
+      this.panel.appendChild(this.body);
+
+      const row = (label, key) => {
+        const div = document.createElement('label');
+        div.style.cssText = [
+          'display: flex !important;',
+          'align-items: center !important;',
+          'justify-content: flex-start !important;',
+          'gap: 7px !important;',
+          'margin: 3px 0 !important;',
+          'padding: 2px 0 !important;',
+          'cursor: pointer !important;',
+          'font-size: 12px !important;',
+          'color: #e2ebe0 !important;',
+          'width: 100% !important;',
+          'box-sizing: border-box !important;',
+          'white-space: nowrap !important;',
+        ].join(' ');
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = CONFIG[key];
+        cb.style.cssText = [
+          'margin: 0 !important;',
+          'padding: 0 !important;',
+          'width: 14px !important;',
+          'height: 14px !important;',
+          'min-width: 14px !important;',
+          'min-height: 14px !important;',
+          'flex-shrink: 0 !important;',
+          'cursor: pointer !important;',
+          'accent-color: #00ff88 !important;',
+        ].join(' ');
+        cb.onchange = () => {
+          if (performance.now() < this._suppressClickUntil) return;
+          CONFIG[key] = cb.checked;
+          saveToggles();
+        };
+        this._checkboxes[key] = cb;
+
+        const span = document.createElement('span');
+        span.textContent = label;
+        span.style.cssText = [
+          'font-size: 12px !important;',
+          'color: #e2ebe0 !important;',
+          'white-space: nowrap !important;',
+          'user-select: none !important;',
+          'line-height: 1.4 !important;',
+        ].join(' ');
+
+        div.append(cb, span);
+        this.body.appendChild(div);
+      };
+
+      row('目标球→袋口（绿色瞄准线）', 'showObjectLine');
+      row('母球→目标球（白色瞄准线）', 'showCueLine');
+      row('母球吃库反弹折线', 'showCushionRebound');
+
+      // 母球吃库折线计算途径切换 (途径1: 拦截数据 / 途径2: 算法无缝移植)
+      const methodRow = document.createElement('div');
+      methodRow.style.cssText = [
+        'display: flex !important;',
+        'align-items: center !important;',
+        'justify-content: space-between !important;',
+        'margin: 2px 0 6px 20px !important;',
+        'font-size: 11px !important;',
+        'color: #a0c0a8 !important;',
+      ].join(' ');
+
+      const methodLabel = document.createElement('span');
+      methodLabel.textContent = '折线途径:';
+      methodLabel.style.cssText = 'white-space: nowrap !important; margin-right: 6px !important;';
+
+      const segBox = document.createElement('div');
+      segBox.style.cssText = [
+        'display: inline-flex !important;',
+        'background: rgba(0, 0, 0, 0.4) !important;',
+        'border: 1px solid rgba(255, 255, 255, 0.15) !important;',
+        'border-radius: 4px !important;',
+        'padding: 1px !important;',
+        'overflow: hidden !important;',
+      ].join(' ');
+
+      const opt1 = document.createElement('button');
+      opt1.type = 'button';
+      opt1.textContent = '途径1: 拦截数据';
+      opt1.title = '途径1: 拦截游戏原生Worker计算数据 (高拟真原生)';
+
+      const opt2 = document.createElement('button');
+      opt2.type = 'button';
+      opt2.textContent = '途径2: 算法移植';
+      opt2.title = '途径2: 无缝移植原生V3动力学模型 (即时零延迟)';
+
+      const updateSegUI = () => {
+        const isWorker = CONFIG.reboundMethod === 'worker';
+        opt1.style.cssText = [
+          'border: none !important;',
+          'border-radius: 3px !important;',
+          'padding: 2px 7px !important;',
+          'font-size: 10.5px !important;',
+          `font-weight: ${isWorker ? '700' : '400'} !important;`,
+          'cursor: pointer !important;',
+          `background: ${isWorker ? '#86cfff' : 'transparent'} !important;`,
+          `color: ${isWorker ? '#081726' : '#9bb0a5'} !important;`,
+          'transition: all 0.15s ease !important;',
+        ].join(' ');
+
+        opt2.style.cssText = [
+          'border: none !important;',
+          'border-radius: 3px !important;',
+          'padding: 2px 7px !important;',
+          'font-size: 10.5px !important;',
+          `font-weight: ${!isWorker ? '700' : '400'} !important;`,
+          'cursor: pointer !important;',
+          `background: ${!isWorker ? '#86cfff' : 'transparent'} !important;`,
+          `color: ${!isWorker ? '#081726' : '#9bb0a5'} !important;`,
+          'transition: all 0.15s ease !important;',
+        ].join(' ');
+      };
+
+      opt1.onclick = (e) => {
+        e.stopPropagation();
+        if (performance.now() < this._suppressClickUntil) return;
+        CONFIG.reboundMethod = 'worker';
+        saveToggles();
+        updateSegUI();
+        showToast('已切换至【途径1: 拦截Worker数据】', 1200);
+      };
+      opt2.onclick = (e) => {
+        e.stopPropagation();
+        if (performance.now() < this._suppressClickUntil) return;
+        CONFIG.reboundMethod = 'algo';
+        saveToggles();
+        updateSegUI();
+        showToast('已切换至【途径2: 移植V3动力学算法】', 1200);
+      };
+
+      updateSegUI();
+      segBox.append(opt1, opt2);
+      methodRow.append(methodLabel, segBox);
+      this.body.appendChild(methodRow);
+
+      row('双击屏幕一键对齐', 'doubleClickAlign');
+      row('信息浮标', 'showHudPill');
+      row('调试信息', 'showDebug');
+
+      const tipHint = document.createElement('div');
+      tipHint.textContent = '💡 提示: 三击屏幕可隐藏/重新显示加号圆圈';
+      tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
+      this.body.appendChild(tipHint);
+
+      // 斯诺克数据与函数抓取爬虫控制卡片
+      const spySection = document.createElement('div');
+      spySection.style.cssText = [
+        'margin: 8px 0 4px 0 !important;',
+        'padding: 8px !important;',
+        'background: rgba(0, 255, 136, 0.08) !important;',
+        'border: 1px solid rgba(0, 255, 136, 0.25) !important;',
+        'border-radius: 6px !important;',
+        'box-sizing: border-box !important;',
+        'width: 100% !important;',
+      ].join(' ');
+
+      const spyHeader = document.createElement('div');
+      spyHeader.style.cssText = 'display: flex !important; justify-content: space-between !important; align-items: center !important; margin-bottom: 4px !important;';
+
+      const spyTitle = document.createElement('span');
+      spyTitle.textContent = '🕷 物理与函数爬虫';
+      spyTitle.style.cssText = 'font-weight: 700 !important; color: #00ff88 !important; font-size: 11px !important;';
+
+      const spyCounter = document.createElement('span');
+      spyCounter.id = 'spy-counter';
+      spyCounter.textContent = '已捕获: 0 次击球';
+      spyCounter.style.cssText = 'color: #a8f0cc !important; font-size: 10px !important;';
+
+      spyHeader.append(spyTitle, spyCounter);
+
+      const spyDesc = document.createElement('div');
+      spyDesc.textContent = '开启后击球练习，后台抓取物理数据与引擎反弹函数比对。';
+      spyDesc.style.cssText = 'font-size: 10px !important; color: #94a3b8 !important; margin-bottom: 6px !important; line-height: 1.3 !important;';
+
+      const spyBtnGrid = document.createElement('div');
+      spyBtnGrid.style.cssText = [
+        'display: grid !important;',
+        'grid-template-columns: 1fr 1fr !important;',
+        'gap: 6px !important;',
+        'width: 100% !important;',
+        'box-sizing: border-box !important;',
+      ].join(' ');
+
+      const createSpyBtn = (text, id, bg, color, onClick) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = id;
+        btn.textContent = text;
+        btn.style.cssText = [
+          'width: 100% !important;',
+          'height: 26px !important;',
+          'line-height: 26px !important;',
+          'border: none !important;',
+          'border-radius: 4px !important;',
+          `background: ${bg} !important;`,
+          `color: ${color} !important;`,
+          'font-size: 11px !important;',
+          'font-weight: 600 !important;',
+          'cursor: pointer !important;',
+          'text-align: center !important;',
+          'padding: 0 4px !important;',
+          'box-sizing: border-box !important;',
+          'white-space: nowrap !important;',
+          'overflow: hidden !important;',
+          'text-overflow: ellipsis !important;',
+        ].join(' ');
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          if (performance.now() < this._suppressClickUntil) return;
+          onClick();
+          if (navigator.vibrate) navigator.vibrate(12);
+        };
+        return btn;
+      };
+
+      const spyToggleBtn = createSpyBtn('▶ 开启爬虫', 'spy-toggle-btn', '#00ff88', '#0b1a11', () => SnookerSpy.toggle());
+      const spyExportBtn = createSpyBtn('💾 导出JSON', 'spy-export-btn', 'rgba(255,255,255,0.12)', '#e2ebe0', () => SnookerSpy.exportJSON());
+      const spyCopyBtn = createSpyBtn('📋 复制最新', 'spy-copy-btn', 'rgba(255,255,255,0.12)', '#e2ebe0', () => SnookerSpy.copyLatestShot());
+      const spyClearBtn = createSpyBtn('🧹 清空数据', 'spy-clear-btn', 'rgba(255,255,255,0.08)', '#94a3b8', () => SnookerSpy.clear());
+
+      spyBtnGrid.append(spyToggleBtn, spyExportBtn, spyCopyBtn, spyClearBtn);
+      spySection.append(spyHeader, spyDesc, spyBtnGrid);
+      this.body.appendChild(spySection);
+
+      this.debugLine = document.createElement('div');
+      this.debugLine.style.cssText = [
+        'margin-top: 6px !important;',
+        'color: #9cb09b !important;',
+        'font-size: 11px !important;',
+        'white-space: pre-line !important;',
+        'line-height: 1.4 !important;',
+        'width: 100% !important;',
+        'box-sizing: border-box !important;',
+      ].join(' ');
+      this.body.appendChild(this.debugLine);
+
+      document.body.appendChild(this.panel);
+      this._built = true;
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', () => this.clampPanelIntoViewport(), { passive: true });
+      }
+
+      let initialCollapsed = true;
+      try {
+        const saved = localStorage.getItem(CONFIG.panelCollapseKey);
+        if (saved !== null) initialCollapsed = saved === '1';
+      } catch (_) {}
+      this.circleHidden = this.loadCircleHidden();
+      this.setCollapsed(initialCollapsed);
+      if (this.circleHidden && this.panel) {
+        this.panel.style.setProperty('display', 'none', 'important');
+      }
+    },
+
+    bindDragEvents() {
+      let isPointerDown = false;
+      let isLongPressActive = false;
+      let didDrag = false;
+      let activePointerId = null;
+      let startX = 0, startY = 0;
+      let panelStartLeft = 0, panelStartTop = 0;
+      let pressTimer = null;
+
+      // 展开状态下支持在控制面板界面直接上下滑动来查看完整内容（无需显式滚动条）
+      let isPanelSwiping = false;
+      let swipeStartY = 0;
+      let swipeStartScroll = 0;
+      let hasSwiped = false;
+
+      this.panel.addEventListener('click', (e) => {
+        if (performance.now() < this._suppressClickUntil) {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      }, true);
+
+      this.panel.addEventListener('pointerdown', (e) => {
+        // 如果当前是展开状态：严禁拖拽移动面板！仅支持在面板界面直接滑动查看内容
+        if (!this.collapsed) {
+          // 允许收起按钮点击正常工作
+          if (this.toggleBtn && (e.target === this.toggleBtn || this.toggleBtn.contains(e.target))) {
+            return;
+          }
+          if (!this.body) return;
+          isPanelSwiping = true;
+          hasSwiped = false;
+          swipeStartY = e.clientY;
+          swipeStartScroll = this.body.scrollTop;
+          return;
+        }
+
+        // 仅在收起为加号圆圈时：长按0.3秒才允许拖动圆圈位置！
+        isPointerDown = true;
+        isLongPressActive = false;
+        didDrag = false;
+        activePointerId = e.pointerId;
+        startX = e.clientX;
+        startY = e.clientY;
+
+        const rect = this.panel.getBoundingClientRect();
+        panelStartLeft = rect.left;
+        panelStartTop = rect.top;
+
+        clearTimeout(pressTimer);
+        pressTimer = setTimeout(() => {
+          pressTimer = null;
+          isLongPressActive = true;
+          try {
+            if (activePointerId != null && this.panel.setPointerCapture) {
+              this.panel.setPointerCapture(activePointerId);
+            }
+          } catch (_) {}
+          try { if (navigator.vibrate) navigator.vibrate(40); } catch (_) {}
+          this.setDragVisual(true);
+        }, 300);
+      });
+
+      window.addEventListener('pointermove', (e) => {
+        // 1. 展开状态下：用户直接在面板界面上下滑动浏览内容
+        if (isPanelSwiping && this.body && !this.collapsed) {
+          const dy = e.clientY - swipeStartY;
+          if (Math.abs(dy) > 3) {
+            hasSwiped = true;
+            this.body.scrollTop = swipeStartScroll - dy;
+          }
+          return;
+        }
+
+        // 2. 收起状态下：长按加号圆圈后的拖动移动
+        if (!isPointerDown || !this.collapsed) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        const dist = Math.hypot(dx, dy);
+
+        if (!isLongPressActive) {
+          if (dist > 8 && pressTimer) {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+          }
+          return;
+        }
+
+        e.preventDefault();
+        didDrag = true;
+
+        const vv = window.visualViewport;
+        const winW = (vv && vv.width) || window.innerWidth || document.documentElement.clientWidth || 800;
+        const winH = (vv && vv.height) || window.innerHeight || document.documentElement.clientHeight || 600;
+        const pW = 21;
+        const pH = 21;
+
+        const newLeft = clamp(panelStartLeft + dx, 0, Math.max(0, winW - pW));
+        const newTop = clamp(panelStartTop + dy, 0, Math.max(0, winH - pH));
+
+        this.panel.style.left = newLeft + 'px';
+        this.panel.style.top = newTop + 'px';
+        this.panel.style.right = 'auto';
+        this.panel.style.bottom = 'auto';
+      });
+
+      const onPointerUp = (e) => {
+        // 处理直接滑动结束
+        if (isPanelSwiping) {
+          if (hasSwiped) {
+            // 滑动过，阻止触发随后的点击事件（防止滑动时光标/手指松开误触复选框或按钮）
+            this._suppressClickUntil = performance.now() + 200;
+          }
+          isPanelSwiping = false;
+          hasSwiped = false;
+        }
+
+        // 处理圆圈拖动结束
+        if (!isPointerDown) return;
+        isPointerDown = false;
+        clearTimeout(pressTimer);
+        pressTimer = null;
+
+        try {
+          if (activePointerId != null && this.panel.hasPointerCapture && this.panel.hasPointerCapture(activePointerId)) {
+            this.panel.releasePointerCapture(activePointerId);
+          }
+        } catch (_) {}
+        activePointerId = null;
+
+        if (isLongPressActive) {
+          this.setDragVisual(false);
+          this._suppressClickUntil = performance.now() + 250;
+          if (didDrag) {
+            const rect = this.panel.getBoundingClientRect();
+            const left = Math.round(rect.left);
+            const top = Math.round(rect.top);
+            this.saveCirclePos(left, top);
+          }
+          isLongPressActive = false;
+          didDrag = false;
+        } else {
+          if (this.collapsed) {
+            e.stopPropagation();
+            this.handlePlusClick();
+          }
+        }
+      };
+
+      window.addEventListener('pointerup', onPointerUp, true);
+      window.addEventListener('pointercancel', onPointerUp, true);
+    },
+
+    setCollapsed(collapsed) {
+      this.collapsed = Boolean(collapsed);
+      const c = this.collapsed;
+
+      if (!c && this._plusExpandTimer) {
+        clearTimeout(this._plusExpandTimer);
+        this._plusExpandTimer = null;
+      }
+
+      if (this.circleHidden) {
+        if (this.panel) {
+          this.panel.style.setProperty('display', 'none', 'important');
+        }
+        return;
+      }
+
+      if (c) {
+        if (this.body) this.body.style.display = 'none';
+        if (this.titleEl) this.titleEl.style.display = 'none';
+        if (this.headerEl) {
+          this.headerEl.style.cssText = [
+            'display: flex !important;',
+            'align-items: center !important;',
+            'justify-content: center !important;',
+            'width: 21px !important;',
+            'height: 21px !important;',
+            'padding: 0 !important;',
+            'margin: 0 !important;',
+            'cursor: pointer !important;',
+          ].join(' ');
+        }
+        if (this.toggleBtn) {
+          this.toggleBtn.textContent = '＋';
+          this.toggleBtn.title = '单击展开面板 (长按0.3s拖动)';
+          this.toggleBtn.style.cssText = [
+            'all: unset !important;',
+            'display: inline-flex !important;',
+            'align-items: center !important;',
+            'justify-content: center !important;',
+            'width: 21px !important;',
+            'height: 21px !important;',
+            'color: #173121 !important;',
+            'font-size: 14px !important;',
+            'font-weight: 700 !important;',
+            'line-height: 1 !important;',
+            'cursor: pointer !important;',
+          ].join(' ');
+        }
+        if (this.panel) {
+          this.panel.style.display = 'block';
+          this.panel.style.width = '21px';
+          this.panel.style.minWidth = '21px';
+          this.panel.style.maxWidth = '21px';
+          this.panel.style.height = '21px';
+          this.panel.style.minHeight = '21px';
+          this.panel.style.maxHeight = '21px';
+          this.panel.style.padding = '0';
+          this.panel.style.borderRadius = '50%';
+          this.panel.style.background = '#d8c694';
+          this.panel.style.setProperty(
+            'box-shadow',
+            '0 4px 14px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.25)',
+            'important'
+          );
+          this.panel.style.backdropFilter = 'none';
+          this.panel.style.overflow = 'hidden';
+          this.panel.style.cursor = 'pointer';
+          this.panel.style.touchAction = 'none';
+          this.panel.title = '单击展开控制面板 (长按0.3秒可拖动)';
+          // 绝对恢复到用户设定的加号圆圈位置，绝不改变
+          this.panel.style.left = this._circlePos.left + 'px';
+          this.panel.style.top = this._circlePos.top + 'px';
+          this.panel.style.right = 'auto';
+          this.panel.style.bottom = 'auto';
+        }
+      } else {
+        if (this.panel) {
+          this.panel.style.display = 'flex';
+          this.panel.style.flexDirection = 'column';
+          this.panel.style.width = '300px';
+          this.panel.style.minWidth = '295px';
+          this.panel.style.maxWidth = '315px';
+          this.panel.style.height = 'auto';
+          this.panel.style.minHeight = 'auto';
+          this.panel.style.maxHeight = 'min(92vh, 92svh, 440px)';
+          this.panel.style.padding = '8px 8px 8px 12px';
+          this.panel.style.borderRadius = '8px';
+          this.panel.style.background = 'rgba(14, 28, 20, 0.94)';
+          this.panel.style.setProperty(
+            'box-shadow',
+            '0 6px 22px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.10)',
+            'important'
+          );
+          this.panel.style.backdropFilter = 'blur(8px)';
+          this.panel.style.overflow = 'hidden';
+          this.panel.style.cursor = 'default';
+          this.panel.style.touchAction = 'pan-y'; // 展开时支持直接上下滑动
+          this.panel.title = '';
+        }
+
+        if (this.titleEl) this.titleEl.style.display = 'inline';
+        if (this.body) {
+          this.body.style.display = 'block';
+          this.body.style.maxHeight = 'calc(min(92vh, 92svh, 440px) - 34px)';
+        }
+        if (this.headerEl) {
+          this.headerEl.style.cssText = [
+            'display: flex !important;',
+            'align-items: center !important;',
+            'justify-content: space-between !important;',
+            'gap: 8px !important;',
+            'width: 100% !important;',
+            'height: 22px !important;',
+            'flex-shrink: 0 !important;',
+            'cursor: default !important;',
+            'box-sizing: border-box !important;',
+          ].join(' ');
+        }
+        if (this.toggleBtn) {
+          this.toggleBtn.textContent = '－';
+          this.toggleBtn.title = '收起为圆圈加号';
+          this.toggleBtn.style.cssText = [
+            'all: unset !important;',
+            'display: inline-flex !important;',
+            'align-items: center !important;',
+            'justify-content: center !important;',
+            'width: 20px !important;',
+            'height: 20px !important;',
+            'min-width: 20px !important;',
+            'min-height: 20px !important;',
+            'max-width: 20px !important;',
+            'max-height: 20px !important;',
+            'box-sizing: border-box !important;',
+            'border: none !important;',
+            'border-radius: 4px !important;',
+            'background: rgba(255, 255, 255, 0.16) !important;',
+            'color: #f0f2e9 !important;',
+            'cursor: pointer !important;',
+            'font-size: 13px !important;',
+            'font-weight: 500 !important;',
+            'line-height: 1 !important;',
+            'padding: 0 !important;',
+            'margin: 0 !important;',
+          ].join(' ');
+        }
+        // 计算展开时的临时展示位置，保证在屏幕内完整显示，绝不污染 _circlePos
+        this.clampPanelIntoViewport();
+      }
+
+      try {
+        localStorage.setItem(CONFIG.panelCollapseKey, c ? '1' : '0');
+      } catch (_) {}
+    },
+
+    formatDebugText(pred, ready, customStatus) {
+      const frameTag = window === window.top
+        ? (projection.canvas && projection.canvas.ownerDocument !== document ? '顶层穿透(iframe)' : '顶层窗口')
+        : '子框架(iframe)';
+
+      if (customStatus) {
+        return `状态: ${customStatus}\n运行帧: ${frameTag}`;
+      }
+      const d = overlay.debug;
+      const srcMap = {
+        geometry: '几何预测',
+      };
+      const predSrc = pred && pred.target ? (srcMap[pred.target.source] || pred.target.source) : '-';
+      let powerLine = '力度: -';
+      if (pred && pred.shot) {
+        const s = pred.shot;
+        powerLine = `力度: ${Math.round(s.power)}% (初速${Math.round(s.effSpeed)}mm/s)`;
+      }
+      const roomLine = (pred && pred.roomMode && pred.roomMode.label) ? `模式: ${pred.roomMode.label}\n` : '';
+      return `${roomLine}${powerLine}\n投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}`;
+    },
+
+    updateDebug(pred, ready, customStatus) {
+      const text = CONFIG.showDebug ? this.formatDebugText(pred, ready, customStatus) : '';
+
+      if (window !== window.top && projection.canvas && projection.canvas.isConnected) {
+        publishFrameDebugToTop(text);
+      }
+
+      if (!this.debugLine) return;
+      this.debugLine.textContent = text;
+    },
+  };
+
+  /* ================================================================== */
+  /* 主循环                                                              */
+  /* ================================================================== */
+
+  function kindLabel(kind) {
+    return ({ cue: '母球', red: '红球', yellow: '黄球', green: '绿球', brown: '咖啡球', blue: '蓝球', pink: '粉球', black: '黑球' })[kind] || kind || '?';
+  }
+
+  let _lastDomDedupe = 0;
+
+  function enforceDomSingletons() {
+    const now = performance.now();
+    if (now - _lastDomDedupe < 1500) return;
+    _lastDomDedupe = now;
+
+    const panels = document.querySelectorAll('#snooker-aim-panel');
+    if (panels.length > 1 && ui.panel) {
+      for (const el of panels) {
+        if (el !== ui.panel) el.remove();
+      }
+    }
+
+    const targetDoc = overlay.getTargetDoc();
+    const overlays = targetDoc.querySelectorAll('#snooker-aim-overlay');
+    if (overlays.length > 1 && overlay.canvas) {
+      for (const el of overlays) {
+        if (el !== overlay.canvas) el.remove();
+      }
+    }
+  }
+
+  function scheduleNextFrame(idle) {
+    if (idle) {
+      setTimeout(() => requestAnimationFrame(frame), 250);
+    } else {
+      requestAnimationFrame(frame);
+    }
+  }
+
+  let _lastFrameCleanTime = 0;
+
+  function frame() {
+    try {
+      ensureUiBuilt();
+      enforceDomSingletons();
+      bindKeyboardShortcuts(document);
+
+      const nowMs = performance.now();
+      if (nowMs - _lastFrameCleanTime > 2500) {
+        _lastFrameCleanTime = nowMs;
+        removeUiFromOtherFrames();
+      }
+
+      if (window !== window.top) {
+        const localC = findGameCanvasInDoc(document);
+        try { document.__snookerAimFrameManaged = Boolean(localC); } catch (_) {}
+      }
+
+      if (window === window.top) {
+        const remote = readActiveRemoteDebug();
+        if (remote) {
+          if (overlay.canvas) overlay.destroy();
+          _lastGeomKey = null;
+          _lastGeomPred = null;
+          _lastRenderKey = null;
+          _lastFullPred = null;
+          if (ui.debugLine) {
+            ui.debugLine.textContent = CONFIG.showDebug ? remote.text : '';
+          }
+          scheduleNextFrame(true);
+          return;
+        }
+      }
+
+      installCoreHook();
+      projection.init();
+
+      const hasCanvas = Boolean(projection.canvas && isCanvasActuallyVisible(projection.canvas));
+      const inLobby = isLobbyMenuVisible();
+      const rawState = (hasCanvas && !inLobby) ? extractRawState() : null;
+      const isSettlement = inLobby ? false : isSettlementOrGameOverScreen(rawState);
+      const isLoading = inLobby ? false : isLoadingScreen(rawState);
+      const inLobbyOrSettlementOrLoading = inLobby || isSettlement || isLoading;
+      const state = (hasCanvas && !inLobbyOrSettlementOrLoading) ? rawState : null;
+
+      if (!hasCanvas || !state || inLobbyOrSettlementOrLoading) {
+        if (overlay.canvas) {
+          overlay.clear();
+          if (!hasCanvas) overlay.destroy();
+        }
+        _lastGeomKey = null;
+        _lastGeomPred = null;
+        _lastRenderKey = null;
+        _lastFullPred = null;
+        _wasInShot = false;
+        _shotHiddenSince = 0;
+
+        let waitReason = '辅助脚本已就绪 · 待进入球桌';
+        if (isSettlement) {
+          waitReason = '本局已结束 · 结算展示中';
+        } else if (isLoading) {
+          waitReason = '加载对局中 · 请稍候...';
+        } else if (inLobby) {
+          waitReason = '大厅待机中 · 待进入球桌';
+        } else if (hasCanvas && !rawState) {
+          waitReason = '已检测到画布 · 等待对局状态初始化';
+        }
+        ui.updateDebug(null, false, waitReason);
+        scheduleNextFrame(true);
+        return;
+      }
+
+      if (projection.canvas.ownerDocument) {
+        bindKeyboardShortcuts(projection.canvas.ownerDocument);
+      }
+      overlay.ensure();
+      overlay.syncSize();
+      projection.source = projection.resolveSource();
+
+      const configChanged = _lastConfigVersion !== _configVersion;
+      const shot = isShotOrMoving(state);
+
+      if (shot) {
+        _wasInShot = true;
+        if (SnookerSpy.enabled) {
+          SnookerSpy.recordMotionFrame(state);
+        }
+        if (!_shotHiddenSince) _shotHiddenSince = performance.now();
+        const now = performance.now();
+        const still = ballsActuallyStill(state);
+        const forceShow = configChanged || now < _forceShowUntil;
+        const autoRecover = (now - _shotHiddenSince > 8000) ||
+          (now - _shotHiddenSince > 3000 && still);
+        if (!forceShow && !autoRecover) {
+          overlay.clear();
+          _lastGeomKey = null;
+          _lastGeomPred = null;
+          _lastRenderKey = null;
+          _lastFullPred = null;
+          ui.updateDebug(null, false, '击球进行中...');
+          scheduleNextFrame(false);
+          return;
+        }
+      } else {
+        if (_wasInShot) {
+          _wasInShot = false;
+          _postShotSettleUntil = performance.now() + 1500;
+          _lastGeomKey = null;
+          _lastGeomPred = null;
+          _lastRenderKey = null;
+          _lastFullPred = null;
+          if (overlay.canvas) overlay.clear();
+          if (SnookerSpy.enabled && SnookerSpy.activeShotRecord) {
+            SnookerSpy.handleCoreEvent({ type: 'shot-settled' });
+          }
+
+          // === 击球落袋结算与斯诺克阶段推进 ===
+          const settledReds = (state.balls || []).filter((b) => b && !b.potted && b.kind === 'red').length;
+          if (settledReds < _shotStartRedCount) {
+            // 本杆成功击进红球！
+            _lastPottedKind = 'red';
+            _turnPhase = 'colorChoice'; // 下一杆打彩球 (若剩0红球则是任意自由彩球)
+          } else {
+            // 本杆未进红球 (击打彩球、未进球或换杆)
+            _lastPottedKind = 'color';
+            _turnPhase = settledReds > 0 ? 'reds' : 'clearance';
+          }
+          _lastActiveRedCount = settledReds;
+          _shotStartRedCount = settledReds;
+        } else {
+          // 击球前瞄准静止状态：维护红球数量基准，若重摆球台(红球数量增加)则重置
+          const curReds = (state.balls || []).filter((b) => b && !b.potted && b.kind === 'red').length;
+          if (curReds > _shotStartRedCount) {
+            _lastPottedKind = null;
+            _turnPhase = 'reds';
+          }
+          _shotStartRedCount = curReds;
+        }
+        _shotHiddenSince = 0;
+      }
+
+      const keys = buildStateKeys(state);
+      if (!keys) {
+        if (overlay.canvas) overlay.clear();
+        _lastRenderKey = null;
+        scheduleNextFrame(false);
+        return;
+      }
+
+      const inPostShotSettle = performance.now() < _postShotSettleUntil;
+      if (!inPostShotSettle && _lastRenderKey === keys.renderKey && !configChanged && _lastFullPred && !_sizesDirty) {
+        ui.updateDebug(_lastFullPred, overlay.debug.ready);
+        scheduleNextFrame(false);
+        return;
+      }
+
+      if (inPostShotSettle || _lastGeomKey !== keys.geomKey || configChanged || !_lastGeomPred) {
+        _lastGeomKey = keys.geomKey;
+        _lastGeomPred = predict(state);
+      }
+
+      const pred = attachShotPowerMetrics(_lastGeomPred, state);
+      const didDraw = overlay.drawPrediction(pred);
+      if (SnookerSpy.enabled) {
+        SnookerSpy.recordAimFrame(state, state.aimPrediction, pred);
+      }
+      _lastRenderKey = didDraw ? keys.renderKey : null;
+      _lastFullPred = pred;
+      _lastConfigVersion = _configVersion;
+      _sizesDirty = false;
+
+      overlay.debug.source = projection.source;
+      overlay.debug.balls = pred ? pred.activeBallCount : 0;
+      overlay.debug.target = pred?.target ? kindLabel(pred.target.ball.kind) : '-';
+      if (pred?.target?.pocket) {
+        const p = pred.target.pocket;
+        const pct = Math.round((p.confidence ?? 1) * 100);
+        const ang = Number.isFinite(p.angleDeg) ? ` 角${Math.round(p.angleDeg)}°` : '';
+        overlay.debug.pocket = pred.insufficientPower ? `${p.label} (力度不足)` : `${p.label} ${pct}%${ang}`;
+      } else {
+        overlay.debug.pocket = '-';
+      }
+      overlay.debug.ready = Boolean(pred && pred.cue && projection.toClothScreen(pred.cue, pred.cue));
+
+      ui.updateDebug(pred, overlay.debug.ready);
+    } catch (err) {
+      devLog('error', '主循环异常:', err);
+    }
+    scheduleNextFrame(false);
+  }
+
+  /* ================================================================== */
+  /* 启动                                                                */
+  /* ================================================================== */
+
+  let rafStarted = false;
+
+  function startLoop() {
+    if (rafStarted) return;
+    rafStarted = true;
+    requestAnimationFrame(frame);
+  }
+
+  let _pollCount = 0;
+  function pollCoreNamespace() {
+    installCoreHook();
+    const tg = getGameGlobal('threeGame');
+    if (tg && tg.core && typeof tg.core.subscribe === 'function' && !tg.core._spySubscribed) {
+      tg.core._spySubscribed = true;
+      try {
+        tg.core.subscribe((event) => SnookerSpy.handleCoreEvent(event));
+      } catch (_) {}
+    }
+    _pollCount++;
+    if (!capturedCore && !readState() && _pollCount < 60) {
+      setTimeout(pollCoreNamespace, _pollCount < 20 ? 50 : 300);
+    }
+  }
+
+  function boot() {
+    installCoreHook();
+    pollCoreNamespace();
+    loadToggles();
+    ensureUiBuilt();
+    startLoop();
+
+    setInterval(() => {
+      ensureUiBuilt();
+      removeUiFromOtherFrames();
+    }, 1500);
+  }
+
+  /* ================================================================== */
+  /* 控制台调试与测试导出接口                                             */
+  /* ================================================================== */
+
+  try {
+    window.__snookerAimUi__ = ui;
+    window.__snookerAimAssistant__ = {
+      version: '1.4.5',
+      CONFIG,
+      TOGGLE_KEYS,
+      BALL_RADIUS_MM,
+      V,
+      predict,
+      predictAim: predict,
+      readTableBounds,
+      rayRailHit,
+      evaluatePocket,
+      formatTipEnglish,
+      resolveEffectiveTip,
+      resolveEffectivePower,
+      buildStateKeys,
+      simulateDirectCushionRebound,
+      simulateCuePostPath,
+      traceRailReflections,
+      tracePhysicsRailReflections,
+      resolvePhysicsCushionRebound,
+      applyCutInducedThrow,
+      snapToPerfectPot,
+      togglePanelCircleVisibility,
+      ui,
+      detectCurrentRoomMode,
+      extractRawState,
+      readState,
+      isPlayableTableState,
+      isSettlementOrGameOverScreen,
+      hasVisibleDarkMaskInDoc,
+      hasVisibleSettlementUiInDoc,
+      isLobbyMenuVisible,
+      overlay,
+      projection,
+      NativeWorkerBridge,
+      SnookerSpy,
+      FALLBACK_POCKETS,
+    };
+  } catch (_) {}
+
+  boot();
+})();
