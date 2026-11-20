@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.5.1
+// @version      1.5.2
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、空格一键吸附对齐进球线、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -186,12 +186,12 @@
   }
 
   const FALLBACK_POCKETS = [
-    { id: 'middle-top', label: '上中袋', type: 'middle', center: { x: 0, y: -957.090867 }, opening: { x: 0, y: -889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: -1 } },
-    { id: 'corner-top-right', label: '右上袋', type: 'corner', center: { x: 1814.830006, y: -918.190443 }, opening: { x: 1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: -0.707107 } },
-    { id: 'corner-bottom-right', label: '右下袋', type: 'corner', center: { x: 1814.830006, y: 918.190443 }, opening: { x: 1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: 0.707107 } },
-    { id: 'middle-bottom', label: '下中袋', type: 'middle', center: { x: 0, y: 957.090867 }, opening: { x: 0, y: 889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: 1 } },
-    { id: 'corner-bottom-left', label: '左下袋', type: 'corner', center: { x: -1814.830006, y: 918.190443 }, opening: { x: -1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: 0.707107 } },
-    { id: 'corner-top-left', label: '左上袋', type: 'corner', center: { x: -1814.830006, y: -918.190443 }, opening: { x: -1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: -0.707107 } },
+    { id: 'middle-top', label: '左侧中袋', type: 'middle', center: { x: 0, y: -957.090867 }, opening: { x: 0, y: -889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: -1 } },
+    { id: 'corner-top-right', label: '左侧顶袋', type: 'corner', center: { x: 1814.830006, y: -918.190443 }, opening: { x: 1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: -0.707107 } },
+    { id: 'corner-bottom-right', label: '右侧顶袋', type: 'corner', center: { x: 1814.830006, y: 918.190443 }, opening: { x: 1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0.707107, y: 0.707107 } },
+    { id: 'middle-bottom', label: '右侧中袋', type: 'middle', center: { x: 0, y: 957.090867 }, opening: { x: 0, y: 889.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: 0, y: 1 } },
+    { id: 'corner-bottom-left', label: '右侧底袋', type: 'corner', center: { x: -1814.830006, y: 918.190443 }, opening: { x: -1765.0, y: 870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: 0.707107 } },
+    { id: 'corner-top-left', label: '左侧底袋', type: 'corner', center: { x: -1814.830006, y: -918.190443 }, opening: { x: -1765.0, y: -870.0 }, captureRadius: DEFAULT_CAPTURE_RADIUS, throatWidthMm: THROAT_WIDTH_MM, dropDirection: { x: -0.707107, y: -0.707107 } },
   ];
 
   /* ================================================================== */
@@ -1353,21 +1353,71 @@
     return { x: 0, y: 0 };
   }
 
+  let _turnPowerActive = false;
+  let _settledRawPower = null;
+  let _turnHasInteracted = false;
+
+  function extractRawStatePower(state) {
+    if (!state) return null;
+    // 优先取游戏渲染层实时力度 state.power（拉杆时实时变动，未拉杆或停球后为 0）
+    if (state.power != null && Number.isFinite(Number(state.power))) {
+      return Number(state.power);
+    }
+    if (state.aim && Number.isFinite(Number(state.aim.power))) {
+      return Number(state.aim.power);
+    }
+    if (state.shot && Number.isFinite(Number(state.shot.power))) {
+      return Number(state.shot.power);
+    }
+    if (state.cue && Number.isFinite(Number(state.cue.power))) {
+      return Number(state.cue.power);
+    }
+    return null;
+  }
+
+  function resetTurnPowerState() {
+    _turnPowerActive = false;
+    _settledRawPower = null;
+    _turnHasInteracted = false;
+  }
+
   function resolveEffectivePower(state) {
-    if (!state) return 50;
-    if (state.aim && Number.isFinite(Number(state.aim.power)) && Number(state.aim.power) > 0) {
-      return clamp(Number(state.aim.power), 2, 100);
+    if (!state) return 0;
+
+    // 1. 若游戏自带实时 state.power 字段（未出杆/未拉杆时为 0），以物理交互层为准
+    if (state.power != null && Number.isFinite(Number(state.power))) {
+      const p = Number(state.power);
+      if (p <= 0) {
+        _turnPowerActive = false;
+        return 0;
+      }
+      _turnPowerActive = true;
+      return clamp(p, 0, 100);
     }
-    if (state.shot && Number.isFinite(Number(state.shot.power)) && Number(state.shot.power) > 0) {
-      return clamp(Number(state.shot.power), 2, 100);
+
+    const raw = extractRawStatePower(state);
+    if (raw == null || raw <= 0) {
+      _turnPowerActive = false;
+      return 0;
     }
-    if (state.cue && Number.isFinite(Number(state.cue.power)) && Number(state.cue.power) > 0) {
-      return clamp(Number(state.cue.power), 2, 100);
+
+    // 2. 若 state.power 缺失，通过与刚停球结算时的残留数值比对，判定是否已开始拉杆交互
+    if (!_turnHasInteracted) {
+      if (_settledRawPower === null) {
+        // 刚进入球桌或刚停球静止：记录残留力度基准，默认未拉杆显示 0%
+        _settledRawPower = raw;
+        return 0;
+      }
+      // 数值与上一杆残留完全一致，玩家尚未开始拉杆
+      if (Math.abs(raw - _settledRawPower) < 0.1) {
+        return 0;
+      }
+      // 数值改变，玩家已开始拉杆蓄力！
+      _turnHasInteracted = true;
+      _turnPowerActive = true;
     }
-    if (Number.isFinite(Number(state.power)) && Number(state.power) > 0) {
-      return clamp(Number(state.power), 2, 100);
-    }
-    return 50;
+
+    return clamp(raw, 0, 100);
   }
 
   /* ================================================================== */
@@ -2568,10 +2618,56 @@
   }
 
   const POCKET_LABELS = {
-    'middle-top': '上中袋', 'middle-bottom': '下中袋',
-    'corner-top-right': '右上袋', 'corner-top-left': '左上袋',
-    'corner-bottom-right': '右下袋', 'corner-bottom-left': '左下袋',
+    'middle-top': '左侧中袋',
+    'middle-bottom': '右侧中袋',
+    'corner-top-right': '左侧顶袋',
+    'corner-bottom-right': '右侧顶袋',
+    'corner-top-left': '左侧底袋',
+    'corner-bottom-left': '右侧底袋',
+    // 兼容可能出现的命名下划线或别名
+    'middle_top': '左侧中袋',
+    'middle_bottom': '右侧中袋',
+    'top_middle': '左侧中袋',
+    'bottom_middle': '右侧中袋',
+    'corner_top_right': '左侧顶袋',
+    'corner_bottom_right': '右侧顶袋',
+    'corner_top_left': '左侧底袋',
+    'corner_bottom_left': '右侧底袋',
+    'pocket_top_right': '左侧顶袋',
+    'pocket_bottom_right': '右侧顶袋',
+    'pocket_top_left': '左侧底袋',
+    'pocket_bottom_left': '右侧底袋',
+    'pocket_middle_top': '左侧中袋',
+    'pocket_middle_bottom': '右侧中袋',
   };
+
+  // 标准斯诺克视角命名（以底库面向顶库，绿球在左侧，黄球在右侧）
+  function formatPocketLabel(p) {
+    if (!p) return '袋口';
+    if (p.id && POCKET_LABELS[p.id]) return POCKET_LABELS[p.id];
+    const pt = p.opening || p.center || p.pos || (Number.isFinite(p.x) ? p : { x: 0, y: 0 });
+    const x = Number(pt.x) || 0;
+    const y = Number(pt.y) || 0;
+    if (Math.abs(x) < 500) {
+      return y < 0 ? '左侧中袋' : '右侧中袋';
+    }
+    if (x > 0) {
+      // 顶库 (靠近黑球一侧)
+      return y < 0 ? '左侧顶袋' : '右侧顶袋';
+    } else {
+      // 底库 (靠近咖啡球一侧)
+      return y < 0 ? '左侧底袋' : '右侧底袋';
+    }
+  }
+
+  // 库边标准名称判定：顶库 (靠近黑球一侧)、底库 (靠近咖啡球一侧)、左侧边库、右侧边库
+  function getCushionLabel(axis, point) {
+    if (axis === 'x') {
+      return (point && point.x > 0) ? '顶库' : '底库';
+    } else {
+      return (point && point.y < 0) ? '左侧边库' : '右侧边库';
+    }
+  }
 
   function mergeSources(sources) {
     const byId = new Map();
@@ -2604,9 +2700,10 @@
         c.throatWidthMm || sp.throatWidthMm || fb.throatWidthMm || THROAT_WIDTH_MM;
       const drop = c.dropDirection || sp.dropDirection || fb.dropDirection || { x: 0, y: -1 };
       const normal = V.norm(drop);
+      const label = formatPocketLabel({ id, opening, center });
       result.push({
         id,
-        label: POCKET_LABELS[id] || id,
+        label,
         type: c.type || sp.type || fb.type || 'corner',
         center,
         opening,
@@ -3168,13 +3265,18 @@
 
       // 途径2 (算法无缝移植) 或 途径1 尚未拦截到 Worker 数据时的无缝回退
       if (railHit) {
+        result.railHit = railHit;
         result.noTargetEnd = railHit.point;
-        result.cuePost = simulateDirectCushionRebound(
-          cue.pos, railHit, d, tip, effPower, vertAngle,
-          boundX, boundY, pockets
-        );
-        if (result.cuePost) {
-          result.cuePost.method = 'algo';
+        if (effPower > 0) {
+          result.cuePost = simulateDirectCushionRebound(
+            cue.pos, railHit, d, tip, effPower, vertAngle,
+            boundX, boundY, pockets
+          );
+          if (result.cuePost) {
+            result.cuePost.method = 'algo';
+          }
+        } else {
+          result.cuePost = null;
         }
       }
       return result;
@@ -3280,10 +3382,10 @@
       }
     }
 
-    // 官方物理引擎无头微模拟器推演 (模块 68 真实复算)
+    // 官方物理引擎无头微模拟器推演 (模块 68 真实复算，未出杆/拉杆力度为0时不启动走位推演)
     const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
     let engine = null;
-    if (CONFIG.engineSimEnabled) {
+    if (CONFIG.engineSimEnabled && effPower > 0) {
       const engineKey = [
         Math.round(effPower * 10),
         Math.round(tip.x * 100),
@@ -4166,8 +4268,10 @@
         }
       }
 
-      // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px (支持途径1拦截 / 途径2移植)
-      if (CONFIG.showCushionRebound && pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) && pred.cuePost.cueCushionPaths.length > 0) {
+      const currentEffPower = Math.max(0, Math.round(Number(pred.shot?.power ?? pred.power ?? 0)));
+
+      // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px (未出杆/力度为0时不绘制)
+      if (currentEffPower > 0 && CONFIG.showCushionRebound && pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) && pred.cuePost.cueCushionPaths.length > 0) {
         const cPath = pred.cuePost.cueCushionPaths[0];
         if (Array.isArray(cPath) && cPath.length >= 2) {
           const pxPts = cPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
@@ -4215,8 +4319,8 @@
         }
       }
 
-      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线)
-      if (CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
+      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线，未出杆/力度为0时不绘制)
+      if (currentEffPower > 0 && CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
         const pxPts = pred.cuePostTrajectory.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
         if (pxPts.length >= 2) {
           hasProjected = true;
@@ -4254,22 +4358,22 @@
 
       // 5) 屏幕正上方切角与出杆状态信息浮标 (实时显示出杆加塞与力度，外框颜色动态变化)
       if (CONFIG.showHudPill) {
-        const effPower = Math.round(Number(pred.shot?.power ?? pred.power ?? 50));
+        const effPower = currentEffPower;
         const tipText = formatTipEnglish(pred.tip || (pred.shot && pred.shot.tip));
-        const potWarning = pred.cuePottedWarning ? ' · ⚠️母球摔袋' : '';
+        const potWarning = (effPower > 0 && pred.cuePottedWarning) ? ' · ⚠️母球摔袋' : '';
 
-        if (pred.unreachable) {
+        if (effPower > 0 && pred.unreachable) {
           this.drawTopHudPill(
             `无法触碰目标球 (力度过小或被阻挡) · 力度 ${effPower}% · ${tipText}`,
             '#ff5555'
           );
         } else if (t && t.pocket) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
-          const isUnderpowered = Boolean(pred.insufficientPower);
+          const isUnderpowered = effPower > 2 && Boolean(pred.insufficientPower);
           const underpoweredWarning = isUnderpowered ? ' · ⚠️力度偏小可能无法进袋' : '';
           const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
           const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
-          const hudRingColor = pred.cuePottedWarning
+          const hudRingColor = (effPower > 0 && pred.cuePottedWarning)
             ? '#ff4444'
             : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
           this.drawTopHudPill(
@@ -4280,14 +4384,15 @@
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           this.drawTopHudPill(
             `${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
-            pred.cuePottedWarning ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
+            (effPower > 0 && pred.cuePottedWarning) ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
           );
         } else if (pred.noTargetEnd) {
           const methodLabel = (CONFIG.reboundMethod === 'worker' && pred.cuePost?.method === 'worker')
             ? '途径1:拦截'
             : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植');
+          const cushionName = pred.railHit ? getCushionLabel(pred.railHit.axis, pred.railHit.point) : '库边';
           this.drawTopHudPill(
-            `直吃库 (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
+            `直吃${cushionName} (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
             '#86cfff'
           );
         }
@@ -5310,6 +5415,7 @@
         _lastFullPred = null;
         _wasInShot = false;
         _shotHiddenSince = 0;
+        resetTurnPowerState();
 
         let waitReason = '辅助脚本已就绪 · 待进入球桌';
         if (isSettlement) {
@@ -5338,6 +5444,9 @@
 
       if (shot) {
         _wasInShot = true;
+        _turnPowerActive = false;
+        _turnHasInteracted = false;
+        _settledRawPower = null;
         if (SnookerSpy.enabled) {
           SnookerSpy.recordMotionFrame(state);
         }
@@ -5365,6 +5474,9 @@
           _lastGeomPred = null;
           _lastRenderKey = null;
           _lastFullPred = null;
+          _turnPowerActive = false;
+          _turnHasInteracted = false;
+          _settledRawPower = extractRawStatePower(state);
           if (overlay.canvas) overlay.clear();
           if (SnookerSpy.enabled && SnookerSpy.activeShotRecord) {
             SnookerSpy.handleCoreEvent({ type: 'shot-settled' });
@@ -5496,7 +5608,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.5.1',
+      version: '1.5.2',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
@@ -5508,9 +5620,13 @@
       trimPolyline,
       detectJunctions,
       evaluatePocket,
+      formatPocketLabel,
+      getCushionLabel,
       formatTipEnglish,
       resolveEffectiveTip,
       resolveEffectivePower,
+      resetTurnPowerState,
+      extractRawStatePower,
       buildStateKeys,
       simulateDirectCushionRebound,
       simulateCuePostPath,
