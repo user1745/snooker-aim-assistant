@@ -23,6 +23,8 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
+  const SCRIPT_VERSION = '1.6.2';
+
   /* ================================================================== */
   /* 配置                                                                */
   /* ================================================================== */
@@ -4557,7 +4559,9 @@
     panel: null,
     body: null,
     headerEl: null,
+    titleBoxEl: null,
     titleEl: null,
+    versionBadgeEl: null,
     toggleBtn: null,
     debugLine: null,
     collapsed: true,
@@ -4712,7 +4716,9 @@
       this.panel = null;
       this.body = null;
       this.headerEl = null;
+      this.titleBoxEl = null;
       this.titleEl = null;
+      this.versionBadgeEl = null;
       this.toggleBtn = null;
       this.debugLine = null;
       this._checkboxes = {};
@@ -4804,6 +4810,16 @@
       ].join(' ');
       this.headerEl = header;
 
+      const titleBox = document.createElement('div');
+      titleBox.id = 'snooker-panel-title-box';
+      titleBox.style.cssText = [
+        'display: flex !important;',
+        'align-items: center !important;',
+        'gap: 6px !important;',
+        'min-width: 0 !important;',
+      ].join(' ');
+      this.titleBoxEl = titleBox;
+
       const title = document.createElement('span');
       title.textContent = '斯诺克瞄准·辅助';
       title.title = '控制面板';
@@ -4817,6 +4833,29 @@
       ].join(' ');
       this.titleEl = title;
 
+      const versionBadge = document.createElement('span');
+      versionBadge.id = 'snooker-panel-version-badge';
+      versionBadge.textContent = 'v' + SCRIPT_VERSION;
+      versionBadge.title = '当前脚本版本: v' + SCRIPT_VERSION;
+      versionBadge.style.cssText = [
+        'font-size: 10px !important;',
+        'font-weight: 700 !important;',
+        'color: #00ff88 !important;',
+        'background: rgba(0, 255, 136, 0.12) !important;',
+        'border: 1px solid rgba(0, 255, 136, 0.35) !important;',
+        'border-radius: 4px !important;',
+        'padding: 1px 5px !important;',
+        'line-height: 1.2 !important;',
+        'display: inline-flex !important;',
+        'align-items: center !important;',
+        'justify-content: center !important;',
+        'letter-spacing: 0.3px !important;',
+        'user-select: none !important;',
+      ].join(' ');
+      this.versionBadgeEl = versionBadge;
+
+      titleBox.append(title, versionBadge);
+
       this.toggleBtn = document.createElement('button');
       this.toggleBtn.type = 'button';
       this.toggleBtn.onclick = (e) => {
@@ -4829,7 +4868,7 @@
           this.setCollapsed(false);
         }
       };
-      header.append(title, this.toggleBtn);
+      header.append(titleBox, this.toggleBtn);
       this.panel.appendChild(header);
 
       this.panel.addEventListener('click', (e) => {
@@ -5343,6 +5382,7 @@
 
       if (c) {
         if (this.body) this.body.style.display = 'none';
+        if (this.titleBoxEl) this.titleBoxEl.style.display = 'none';
         if (this.titleEl) this.titleEl.style.display = 'none';
         if (this.headerEl) {
           this.headerEl.style.cssText = [
@@ -5425,6 +5465,7 @@
           this.panel.title = '';
         }
 
+        if (this.titleBoxEl) this.titleBoxEl.style.display = 'flex';
         if (this.titleEl) this.titleEl.style.display = 'inline';
         if (this.body) {
           this.body.style.display = 'block';
@@ -5793,7 +5834,8 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.6.2',
+      version: SCRIPT_VERSION,
+      SCRIPT_VERSION,
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
