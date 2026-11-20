@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.2
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、瞄准线动态吞噬擦除(出杆后随着母球和目标球向前走动/白绿瞄准线逐步动态擦除/撞击与进袋瞬间彻底消失)、全台物理绝对静止追踪状态机(彻底修复目标球落袋时蓝色预测线过早消失Bug/母球与台面球未完全停稳绝不消失/全台彻底静止后才平滑交接)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离(彻底根除新一杆击打时绿色瞄准线完整闪现一次的视觉瑕疵)、低杆真实滑动摩擦阻力模型校准(真实还原强滑移功耗/极限低杆~35%力度精准变绿实线/杜绝25%虚假绿线停球)、母球走位预测线架构重构(过期缓存指纹校验根除初次乱画/0ms瞬时物理走位线60FPS跟手实时响应/45ms时间片节流消灭调力1~2秒卡顿滞后)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.7.3
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、瞄准阶段绝对直通保护(彻底修复瞄准时白绿瞄准线偶发不显示Bug/静态瞄准与动态走位擦除彻底解耦)、独占击球走位物理保护锁_shotMotionLocked(彻底根治目标球落袋母球走位时蓝色落位预测线提前消失Bug/全台母球未停绝对不退出走位渲染/全台绝对停稳后才平滑交接)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离(彻底根除新一杆击打时绿色瞄准线完整闪现一次的视觉瑕疵)、低杆真实滑动摩擦阻力模型校准(真实还原强滑移功耗/极限低杆~35%力度精准变绿实线/杜绝25%虚假绿线停球)、母球走位预测线架构重构(过期缓存指纹校验根除初次乱画/0ms瞬时物理走位线60FPS跟手实时响应/45ms时间片节流消灭调力1~2秒卡顿滞后)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.2';
+  const SCRIPT_VERSION = '1.7.3';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1090,14 +1090,17 @@
 
   function isPlayableTableState(state) {
     if (!state || !Array.isArray(state.balls) || state.balls.length === 0) return false;
-    const hasCue = state.balls.some((b) => b && !b.potted && (b.kind === 'cue' || b.id === state.cueBallId));
+    const hasCue = state.balls.some((b) => b && !b.potted && (b.kind === 'cue' || b.id === state.cueBallId || b.isCue || b.kind === 0));
     const activeObjs = activeObjectBalls(state);
-    const hasAimOrMoving = Boolean(state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x)) || isShotOrMoving(state);
+    const hasAimOrMoving = Boolean(state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x)) || isShotOrMoving(state) || _shotMotionLocked;
     const notOver = !(state.isOver || state.gameOver || state.frameOver || state.isSettlement || state.isFinished || state.finished);
-    return hasCue && hasAimOrMoving && activeObjs.length > 0 && notOver;
+    return hasCue && hasAimOrMoving && (activeObjs.length > 0 || _shotMotionLocked) && notOver;
   }
 
   function isSettlementOrGameOverScreen(state) {
+    // 击球走位锁定时绝对豁免结算判定，严防目标球落袋时母球还在滚动却误判结算导致提前清屏
+    if (_shotMotionLocked) return false;
+
     // 0. 优先保障：如果当前是明确的可玩台面状态（有母球、有目标球、且有瞄准线），绝不误判为结算！
     if (isPlayableTableState(state)) {
       _frameOrMatchOver = false;
@@ -1187,6 +1190,7 @@
   }
 
   function isLobbyOrNonTableScreen(state) {
+    if (_shotMotionLocked) return false;
     // 0. 可玩台面状态具有最高通行权
     if (isPlayableTableState(state)) {
       _frameOrMatchOver = false;
@@ -1460,6 +1464,7 @@
   let _shotHiddenSince = 0;
   let _forceShowUntil = 0;
   let _wasInShot = false;
+  let _shotMotionLocked = false;
   let _postShotSettleUntil = 0;
 
   function hasBallVelocity(state) {
@@ -1471,13 +1476,13 @@
         const vx = Number(v.x) || 0;
         const vy = Number(v.y) || 0;
         const vz = Number(v.z) || 0;
-        // 速度阈值设为 2.0 mm/s (平方 4.0)，高灵敏捕捉母球慢速走位，严防母球未停误判静止
-        if ((vx * vx + vy * vy + vz * vz) > 4.0) return true;
+        // 速度阈值设为 1.5 mm/s (平方 2.25)，超高灵敏捕捉母球慢速走位，严防母球未停误判静止
+        if ((vx * vx + vy * vy + vz * vz) > 2.25) return true;
       } else if (Number.isFinite(b.vx) || Number.isFinite(b.vy) || Number.isFinite(b.vz)) {
         const vx = Number(b.vx) || 0;
         const vy = Number(b.vy) || 0;
         const vz = Number(b.vz) || 0;
-        if ((vx * vx + vy * vy + vz * vz) > 4.0) return true;
+        if ((vx * vx + vy * vy + vz * vz) > 2.25) return true;
       }
     }
     return false;
@@ -1490,15 +1495,30 @@
     if (!state || !Array.isArray(state.balls)) return false;
     let moved = false;
     let count = 0;
+
+    // 专项检测母球自身状态 (母球未停绝对不算静止)
+    const cueBall = getCueBall(state);
+    if (cueBall && !cueBall.potted) {
+      const cpx = Number.isFinite(cueBall.pos?.x) ? cueBall.pos.x : (Number.isFinite(cueBall.x) ? cueBall.x : null);
+      const cpy = Number.isFinite(cueBall.pos?.y) ? cueBall.pos.y : (Number.isFinite(cueBall.y) ? cueBall.y : null);
+      if (cpx !== null && cpy !== null) {
+        const prevCue = _lastBallPositions.get('__cue_ball__');
+        if (prevCue && Math.hypot(prevCue.x - cpx, prevCue.y - cpy) > 0.015) {
+          moved = true;
+        }
+        _lastBallPositions.set('__cue_ball__', { x: cpx, y: cpy });
+        count++;
+      }
+    }
+
     state.balls.forEach((b, i) => {
       if (!b || b.potted) return;
       const px = (b.pos && Number.isFinite(b.pos.x)) ? b.pos.x : (Number.isFinite(b.x) ? b.x : null);
       const py = (b.pos && Number.isFinite(b.pos.y)) ? b.pos.y : (Number.isFinite(b.y) ? b.y : null);
       if (px === null || py === null) return;
-      const key = b.id != null ? String(b.id) : (b.isCue || b.kind === 'cue' ? 'cue' : `${b.kind || 'ball'}:${i}`);
+      const key = b.id != null ? String(b.id) : (b.isCue || b.kind === 'cue' || b.kind === 0 ? 'cue' : `${b.kind || 'ball'}:${i}`);
       const prev = _lastBallPositions.get(key);
-      // 高精位移阈值设为 0.05mm (配合 2mm/s 速度检测，确保母球完全停稳)
-      if (prev && Math.hypot(prev.x - px, prev.y - py) > 0.05) moved = true;
+      if (prev && Math.hypot(prev.x - px, prev.y - py) > 0.015) moved = true;
       _lastBallPositions.set(key, { x: px, y: py });
       count++;
     });
@@ -1567,7 +1587,10 @@
     const res = event.result || event.detail?.result || event;
     if (event.type === 'frame-over' || event.type === 'game-over' || res.frameOver || res.matchOver || res.gameOver || res.isOver) {
       _frameOrMatchOver = true;
-      if (overlay && overlay.canvas) overlay.clear();
+      // 击球走位中暂缓清空画布，等待母球和台面完全停稳
+      if (!_shotMotionLocked && overlay && overlay.canvas) {
+        overlay.clear();
+      }
       return;
     }
   }
@@ -2746,15 +2769,16 @@
 
   function getCueBall(state) {
     if (!state || !Array.isArray(state.balls)) return null;
-    const byId = (state.cueBallId != null) ? state.balls.find((b) => b.id === state.cueBallId) : null;
+    const byId = (state.cueBallId != null) ? state.balls.find((b) => b && (b.id === state.cueBallId || String(b.id) === String(state.cueBallId))) : null;
     if (byId) return byId;
-    return state.balls.find((b) => b.kind === 'cue') || null;
+    return state.balls.find((b) => b && (b.kind === 'cue' || b.isCue || b.kind === 0)) || null;
   }
 
   function activeObjectBalls(state) {
     if (!state || !Array.isArray(state.balls)) return [];
+    const cueId = state.cueBallId != null ? String(state.cueBallId) : null;
     return state.balls.filter(
-      (b) => b && b.kind !== 'cue' && !b.potted && (
+      (b) => b && !b.potted && b.kind !== 'cue' && !b.isCue && b.kind !== 0 && (cueId == null || String(b.id) !== cueId) && (
         (b.pos && Number.isFinite(b.pos.x)) || Number.isFinite(b.x)
       )
     );
@@ -5043,20 +5067,28 @@
 
       const t = pred.target || null;
 
-      // 提取母球与目标球的实时球位 (优先从 currentBalls 读取，用于击球走位动态擦除)
+      if (!inMotion) {
+        // 静态瞄准预览阶段：绝对直通保护！
+        // 强制复位所有动态走位裁剪与终结状态，严防任何上一杆走位残留标记污染当前瞄准预览
+        _cueLineCompleted = false;
+        _targetLineCompleted = false;
+        _targetMaxTravel = 0;
+      }
+
+      // 提取母球与目标球的实时球位 (仅在出杆击球 inMotion === true 阶段才读取并用于击球走位动态擦除)
       let liveCuePos = null;
       let liveTargetPos = null;
       let liveTargetPotted = false;
       const targetBallKind = pred.target?.ball?.kind;
       const targetBallId = pred.target?.ball?.id;
 
-      if (Array.isArray(currentBalls) && currentBalls.length > 0) {
+      if (inMotion && Array.isArray(currentBalls) && currentBalls.length > 0) {
         for (const b of currentBalls) {
           if (!b || !b.pos) continue;
           if (b.isCue || b.kind === 'cue' || b.kind === 0) {
             liveCuePos = b.pos;
           } else if (
-            (targetBallId != null && b.id === targetBallId) ||
+            (targetBallId != null && String(b.id) === String(targetBallId)) ||
             (targetBallKind != null && b.kind === targetBallKind)
           ) {
             liveTargetPos = b.pos;
@@ -5072,20 +5104,34 @@
       let ghostPx = null;
       let hasProjected = false;
 
-      // 1) 母球瞄准线：出杆后随母球向前移动逐步擦除，撞击目标球瞬间完全消失
+      // 1) 母球瞄准线：静态预览全长绘制；出杆后随母球向前移动逐步擦除，撞击目标球瞬间完全消失
       if (CONFIG.showCueLine) {
         const contactTarget = (t && t.contact) ? t.contact : pred.noTargetEnd;
         if (contactTarget) {
-          // 目标球是否已经开始移动或已落袋（一旦目标球动了，说明碰撞已发生）
-          const origTargetPos = t?.ball?.pos;
-          const targetMoved = Boolean(
-            liveTargetPotted ||
-            (origTargetPos && liveTargetPos && Math.hypot(liveTargetPos.x - origTargetPos.x, liveTargetPos.y - origTargetPos.y) > 4)
-          );
-          const trimmed = trimCueAimLineFromLive(cueWorld, contactTarget, liveCuePos, targetMoved);
-          if (trimmed) {
-            const startPx = this.localCloth(trimmed.start, cueWorld);
-            const endPx = this.localCloth(trimmed.end, cueWorld);
+          let startPt = cueWorld;
+          let endPt = contactTarget;
+          let showGhost = Boolean(t && t.contact);
+
+          if (inMotion) {
+            // 只有在出杆击球运动中才进行动态实时吞噬裁剪
+            const origTargetPos = t?.ball?.pos;
+            const targetMoved = Boolean(
+              liveTargetPotted ||
+              (origTargetPos && liveTargetPos && Math.hypot(liveTargetPos.x - origTargetPos.x, liveTargetPos.y - origTargetPos.y) > 4)
+            );
+            const trimmed = trimCueAimLineFromLive(cueWorld, contactTarget, liveCuePos, targetMoved);
+            if (trimmed) {
+              startPt = trimmed.start;
+              endPt = trimmed.end;
+              showGhost = trimmed.showGhost;
+            } else {
+              startPt = null;
+            }
+          }
+
+          if (startPt && endPt) {
+            const startPx = this.localCloth(startPt, cueWorld);
+            const endPx = this.localCloth(endPt, cueWorld);
             if (startPx && endPx) {
               hasProjected = true;
               ctx.save();
@@ -5102,7 +5148,7 @@
               drawnSegments.push([startPx, endPx]);
 
               // 绘制假想球：若未撞击目标球，在目标接触点显示假想球
-              if (trimmed.showGhost) {
+              if (showGhost && t && t.contact) {
                 this.drawGhostBall(contactTarget, cueWorld);
                 ghostPx = endPx;
               }
@@ -5111,12 +5157,17 @@
         }
       }
 
-      // 2) 目标球延长线：撞击后随目标球向前移动逐步擦除，进袋或弹库走完瞬间彻底消失 (若拉杆力度不足以入袋则转为警告橙色虚线)
+      // 2) 目标球延长线：静态预览全长绘制；出杆撞击后随目标球向前移动逐步擦除，进袋或弹库走完瞬间彻底消失 (若拉杆力度不足以入袋则转为警告橙色虚线)
       if (t && CONFIG.showObjectLine && Array.isArray(t.objectPath) && t.objectPath.length >= 2) {
-        const trimmedObjectPath = trimObjectPathFromLive(t.objectPath, liveTargetPos, liveTargetPotted, inMotion);
-        if (trimmedObjectPath && trimmedObjectPath.length >= 2) {
+        let pathToDraw = t.objectPath;
+        if (inMotion) {
+          // 仅在真实出杆运动中执行动态单向擦除与终结销毁
+          pathToDraw = trimObjectPathFromLive(t.objectPath, liveTargetPos, liveTargetPotted, true);
+        }
+
+        if (pathToDraw && pathToDraw.length >= 2) {
           const isUnderpowered = currentEffPower > 2 && Boolean(pred.insufficientPower);
-          const pxPts = trimmedObjectPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
+          const pxPts = pathToDraw.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
 
           if (pxPts.length >= 2) {
             hasProjected = true;
@@ -6329,9 +6380,9 @@
       const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
-      const state = (hasCanvas && !inLobbyOrSettlementOrLoading) ? rawState : null;
+      const state = (hasCanvas && (!inLobbyOrSettlementOrLoading || _shotMotionLocked)) ? rawState : null;
 
-      if (!hasCanvas || !state || inLobbyOrSettlementOrLoading) {
+      if ((!hasCanvas || !state || inLobbyOrSettlementOrLoading) && !_shotMotionLocked) {
         _nonTableFrames++;
         if (overlay.canvas) {
           overlay.clear();
@@ -6343,6 +6394,7 @@
         _lastFullPred = null;
         _lastShotPred = null;
         _wasInShot = false;
+        _shotMotionLocked = false;
         _shotHiddenSince = 0;
         resetTurnPowerState();
         if (DailyChallengeEngine.running && _nonTableFrames > 25) {
@@ -6377,10 +6429,11 @@
       const shot = isShotOrMoving(state);
       const still = ballsActuallyStill(state);
 
-      if (shot || (_wasInShot && !still)) {
+      if (shot || (_wasInShot && !still) || _shotMotionLocked) {
         if (!_wasInShot) {
-          // 本杆刚刚触发击球出杆！重置本杆的目标球与母球单向吞噬状态
+          // 本杆刚刚触发击球出杆！重置本杆的目标球与母球单向吞噬状态，进入击球走位物理锁
           _wasInShot = true;
+          _shotMotionLocked = true;
           resetTargetMotionState();
           resetCueMotionState();
         }
@@ -6392,29 +6445,46 @@
         const forceShow = configChanged || now < _forceShowUntil;
         const autoRecover = (now - _shotHiddenSince > 18000);
 
-        if (!forceShow && !autoRecover) {
-          // 出杆击球走位中：只要母球或台面球未完全停稳，持续锁定快照绘制！目标球落袋绝不退出！
-          if (_lastShotPred) {
-            overlay.drawPrediction(_lastShotPred, state?.balls, true /* inMotion */);
-            if (DailyChallengeEngine.running) {
-              hudPill.show('🤖 自动化击球进行中 · 目标球走位中...', '#00ff88');
-            } else {
-              const effPower = Math.max(0, Math.round(Number(_lastShotPred.shot?.power ?? _lastShotPred.power ?? 0)));
-              const targetPocket = _lastShotPred.target?.pocket?.label || '';
-              const statusText = targetPocket
-                ? `🎯 击球走位中... · 目标${targetPocket} · 力度 ${effPower}%`
-                : `🎯 击球走位中... · 力度 ${effPower}%`;
-              hudPill.show(statusText, '#00ff88');
+        if (still) {
+          // 全台所有球（母球及目标球）完全停稳！解除出杆走位保护锁
+          _shotMotionLocked = false;
+          _wasInShot = false;
+          _postShotSettleUntil = performance.now() + 600; // 停球后保留 600ms 比对母球落位
+          _shotHiddenSince = 0;
+          _settledRawPower = extractRawStatePower(state);
+        } else {
+          // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
+          _shotMotionLocked = true;
+          if (autoRecover) {
+            _shotMotionLocked = false;
+            _wasInShot = false;
+            _shotHiddenSince = 0;
+          } else if (!forceShow) {
+            // 出杆击球走位中：母球走位预测线与落位幽灵球持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
+            const predToDraw = _lastShotPred || _lastFullPred;
+            if (predToDraw) {
+              overlay.drawPrediction(predToDraw, state?.balls, true /* inMotion */);
+              if (DailyChallengeEngine.running) {
+                hudPill.show('🤖 自动化击球进行中 · 目标球走位中...', '#00ff88');
+              } else {
+                const effPower = Math.max(0, Math.round(Number(predToDraw.shot?.power ?? predToDraw.power ?? 0)));
+                const targetPocket = predToDraw.target?.pocket?.label || '';
+                const statusText = targetPocket
+                  ? `🎯 击球走位中... · 目标${targetPocket} · 力度 ${effPower}%`
+                  : `🎯 击球走位中... · 力度 ${effPower}%`;
+                hudPill.show(statusText, '#00ff88');
+              }
             }
+            ui.updateDebug(predToDraw, true, '击球走位进行中...');
+            DailyChallengeEngine.onFrame(state, shot, still);
+            scheduleNextFrame(false);
+            return;
           }
-          ui.updateDebug(_lastShotPred, true, '击球走位进行中...');
-          DailyChallengeEngine.onFrame(state, shot, still);
-          scheduleNextFrame(false);
-          return;
         }
       } else {
         if (_wasInShot) {
           _wasInShot = false;
+          _shotMotionLocked = false;
           _postShotSettleUntil = performance.now() + 600; // 停球后保留 600ms 比对母球落位
           _turnPowerActive = false;
           _turnHasInteracted = false;
@@ -6426,7 +6496,9 @@
       DailyChallengeEngine.onFrame(state, shot, still);
 
       // 检查后置静止展示期（展示上一杆母球实际停位与预测停位对比）
-      const inPostSettleWindow = performance.now() < _postShotSettleUntil;
+      // 若用户已开始瞄准新一杆（存在有效瞄准方向或拉杆交互），提前结束展示期，立即进入新一杆瞄准
+      const userStartedAiming = Boolean(state && state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x));
+      const inPostSettleWindow = (performance.now() < _postShotSettleUntil) && !userStartedAiming;
       if (inPostSettleWindow && _lastShotPred) {
         overlay.drawPrediction(_lastShotPred, state?.balls, true /* inMotion */);
         scheduleNextFrame(false);
@@ -6434,7 +6506,7 @@
       }
 
       // 静止比对期结束，彻底销毁上一杆旧快照与运动状态，严防新一杆闪现旧瞄准线！
-      if (_postShotSettleUntil > 0 && performance.now() >= _postShotSettleUntil) {
+      if (_postShotSettleUntil > 0 && (performance.now() >= _postShotSettleUntil || userStartedAiming)) {
         _lastShotPred = null;
         _postShotSettleUntil = 0;
         resetTargetMotionState();
@@ -6466,7 +6538,7 @@
       const didDraw = overlay.drawPrediction(pred, state?.balls, false /* inMotion: 静态瞄准预览 */);
       _lastRenderKey = didDraw ? keys.renderKey : null;
       _lastFullPred = pred;
-      if (pred && pred.cue && pred.target) {
+      if (pred && pred.cue) {
         const hasValidTrajectory = Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2;
         const curPower = Math.max(0, Math.round(Number(pred.shot?.power ?? pred.power ?? 0)));
         const isDifferentAim = !_lastShotPred ||
@@ -6474,7 +6546,7 @@
           Math.hypot((_lastShotPred.cue?.x || 0) - pred.cue.x, (_lastShotPred.cue?.y || 0) - pred.cue.y) > 20;
 
         // 缓存有效瞄准预测快照，供出杆击球过程中持续保留绘制
-        if (isDifferentAim || hasValidTrajectory || curPower > 2 || !Array.isArray(_lastShotPred.cuePostTrajectory)) {
+        if (isDifferentAim || hasValidTrajectory || curPower > 2 || !_lastShotPred || !Array.isArray(_lastShotPred.cuePostTrajectory)) {
           _lastShotPred = pred;
         }
       }
