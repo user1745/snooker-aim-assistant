@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.2
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台自由选球/100%满力击球/死局冲球解围/连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.3
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台自由选球/智能力度击球/死局冲球解围/连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.2';
+  const SCRIPT_VERSION = '1.6.3';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1682,10 +1682,11 @@
   }
 
   /* ================================================================== */
-  /* 【每日挑战自动化击球】全台自由选球、无阻挡最优下球、死局冲球解围、100%满力出杆 */
+  /* 【每日挑战自动化击球】全台自由选球、无阻挡最优下球、死局冲球解围、智能力度出杆 */
   /* ================================================================== */
 
-  function triggerFullPowerStrike(callback) {
+  function triggerStrike(callback, power = 100) {
+    const targetPower = clamp(Math.round(Number(power) || 100), 2, 100);
     const tg = getGameGlobal('threeGame');
     const sp = getGameGlobal('SnookerProduct');
     const practice = sp && sp.practice;
@@ -1700,10 +1701,10 @@
     }
 
     if (targetCore) {
-      // 1. 设置 100% 满力
+      // 1. 设置智能力度
       try {
         if (typeof targetCore.setPower === 'function') {
-          targetCore.setPower(100);
+          targetCore.setPower(targetPower);
         }
       } catch (_) {}
 
@@ -1712,7 +1713,7 @@
         let shotSuccess = false;
         try {
           if (typeof targetCore.setPower === 'function') {
-            targetCore.setPower(100);
+            targetCore.setPower(targetPower);
           }
           // 核心关键修复：
           // core.shoot(now = performance.now()) 必须接收有效数值时间戳（或不传参使用默认值），
@@ -1734,16 +1735,23 @@
         }
 
         // 4. 若 core.shoot 未生效，使用手势兜底
-        simulatePowerSliderPullAndRelease(callback);
+        simulatePowerSliderPullAndRelease(callback, targetPower);
       }, 60);
       return;
     }
 
     // 无 core 时的兜底手势
-    simulatePowerSliderPullAndRelease(callback);
+    simulatePowerSliderPullAndRelease(callback, targetPower);
   }
 
-  function simulatePowerSliderPullAndRelease(done) {
+  // 向前兼容别名
+  function triggerFullPowerStrike(callback) {
+    return triggerStrike(callback, 100);
+  }
+
+  function simulatePowerSliderPullAndRelease(done, power = 100) {
+    const targetPower = clamp(Math.round(Number(power) || 100), 2, 100);
+    const powerRatio = targetPower / 100;
     const targetDoc = overlay.getTargetDoc();
     const win = targetDoc.defaultView || window;
     const canvas = projection.canvas || findGameCanvasInDoc(targetDoc);
@@ -1774,14 +1782,16 @@
       startX = r.left + r.width / 2;
       startY = r.top + Math.max(8, r.height * 0.1);
       endX = startX;
-      endY = r.top + r.height * 0.95;
+      const maxEndY = r.top + r.height * 0.95;
+      endY = startY + (maxEndY - startY) * powerRatio;
     } else if (canvas) {
       targetNode = canvas;
       const r = canvas.getBoundingClientRect();
       startX = r.left + r.width * 0.93;
       startY = r.top + r.height * 0.28;
       endX = startX;
-      endY = r.top + r.height * 0.88;
+      const maxEndY = r.top + r.height * 0.88;
+      endY = startY + (maxEndY - startY) * powerRatio;
     }
 
     if (!targetNode) {
@@ -1923,7 +1933,25 @@
       if (pathBlocked(ball.pos, pk.opening, objects, ball.id, cue.id)) return null;
 
       const distObjToPk = V.dist(ball.pos, pk.opening);
-      const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000);
+      // 物理极限可达性检查（能量守恒）：即使 100% 满力目标球最大位移也达不到袋口，直接淘汰
+      const maxReachAt100 = reachCapFallback(100, cutDot);
+      if (maxReachAt100 != null && distObjToPk > maxReachAt100) return null;
+
+      // 计算该路线推荐出杆力度（基于 3.4.2 实测动力学模型与能量衰减）
+      const recommendedPower = calculateRecommendedPower(
+        cue.pos,
+        contactG,
+        ball.pos,
+        pk.enterPoint || pk.opening,
+        cueDir,
+        { x: 0, y: 0 },
+        2.5
+      );
+      if (recommendedPower > 100) return null; // 无法以安全力度打进，排除
+
+      // 力度合理性惩罚：对需要 75% 以上大力量的高难度球适度扣分，优先选择更稳健的中小力量线路
+      const powerPenalty = recommendedPower > 75 ? (recommendedPower - 75) * 0.025 : 0;
+      const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000) - powerPenalty;
 
       return {
         ball,
@@ -1933,6 +1961,7 @@
         cutDot,
         cutAngleDeg,
         confidence: ev.confidence,
+        recommendedPower,
         score,
         isBreakup: false,
       };
@@ -2051,16 +2080,19 @@
     _lastRenderKey = null;
 
     let targetDesc = '';
+    const strikePower = isBreakup ? 100 : clamp(chosenRoute.recommendedPower || 50, 15, 100);
+
     if (isBreakup) {
       targetDesc = `💥 无直接下球，100%满力冲球解围「${kindLabel(bestBall.kind)}」`;
     } else {
-      targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}°`;
+      targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}° · 力度 ${strikePower}%`;
     }
 
     if (autoStrike) {
-      showToast(`${targetDesc} · 100%满力出杆!`, 1500);
+      const pwrLabel = isBreakup ? '100%满力出杆!' : `力度 ${strikePower}% 出杆!`;
+      showToast(`${targetDesc} · ${pwrLabel}`, 1500);
       setTimeout(() => {
-        triggerFullPowerStrike();
+        triggerStrike(null, strikePower);
       }, 60);
     } else {
       showToast(`🎯 已对准: ${targetDesc}`, 1500);
@@ -3081,26 +3113,82 @@
   const simulateCuePostPath = simulateDirectCushionRebound;
   const simulateCuePostAndCushionPaths = simulateDirectCushionRebound;
 
-  // 4. 最佳入袋推荐出杆力度计算
+  /* ================================================================== */
+  /* v3.4.2 实测动力学模型与能量守恒插值系统                              */
+  /* ================================================================== */
+
+  // 147master 原生物理引擎实测空打总行程（含台呢摩擦与真实滑-滚转换，单位：mm）
+  // 9%→904mm, 20%→2700mm, 30%→5360mm, 40%→7720mm, 50%→8670mm, 60%→10480mm, 70%→11950mm, 80%→12690mm, 93%→14450mm, 100%→14870mm
+  const CUE_POWER_CURVE = [
+    [0, 0], [9, 904], [20, 2700], [30, 5360], [40, 7720], [50, 8670],
+    [60, 10480], [70, 11950], [80, 12690], [93, 14450], [100, 14870],
+  ];
+
+  /**
+   * 正向计算：按出杆力度获取母球真实自由跑总行程（mm）
+   */
+  function cueTravelByPower(power, retention = 1) {
+    const p = clamp(Number(power) || 0, 0, 100);
+    if (p <= 0) return 0;
+    const tbl = CUE_POWER_CURVE;
+    let i = 1;
+    while (i < tbl.length - 1 && p > tbl[i][0]) i++;
+    const a = tbl[i - 1], b = tbl[i];
+    const t = (p - a[0]) / Math.max(1e-6, b[0] - a[0]);
+    const mm = a[1] + (b[1] - a[1]) * clamp(t, 0, 1);
+    return mm * clamp(Number(retention) || 1, 0, 1);
+  }
+
+  /**
+   * 逆向反推：根据所需总行进位移（mm）逆向推导所需的基础出杆力度百分比（0~100%）
+   */
+  function powerByCueTravel(travelMm) {
+    const dist = Math.max(0, Number(travelMm) || 0);
+    if (dist <= 0) return 0;
+    const tbl = CUE_POWER_CURVE;
+    const maxMm = tbl[tbl.length - 1][1];
+    if (dist >= maxMm) return 100;
+    let i = 1;
+    while (i < tbl.length - 1 && dist > tbl[i][1]) i++;
+    const a = tbl[i - 1], b = tbl[i];
+    const t = (dist - a[1]) / Math.max(1e-6, b[1] - a[1]);
+    const p = a[0] + (b[0] - a[0]) * clamp(t, 0, 1);
+    return clamp(p, 0, 100);
+  }
+
+  /**
+   * 目标球能量折算可达距离（mm）：E_obj ∝ v_cue^2 * cos^2(cut)
+   */
+  function reachCapFallback(power, cutCos) {
+    const p = Number(power);
+    if (!Number.isFinite(p) || p <= 0) return null;
+    const cc = Number.isFinite(Number(cutCos)) ? clamp(Number(cutCos), 0, 1) : 1;
+    const mm = cueTravelByPower(p, 1) * cc * cc;
+    return mm > 0 ? clamp(mm, 60, 6000) : null;
+  }
+
+  // 4. 最佳入袋推荐出杆力度计算（基于 3.4.2 实测动力学模型与能量守恒）
   function calculateRecommendedPower(cuePos, contactPos, targetBallPos, pocketPos, aimDir, tipOffset, verticalAngle) {
     const sObj = V.dist(targetBallPos, pocketPos);
     const sCue = V.dist(cuePos, contactPos);
     const normal = V.norm(V.sub(targetBallPos, contactPos));
     const cosCut = clamp(V.dot(aimDir, normal), 0.08, 1);
-    const a = CONFIG.clothRollingDecelMmS2 || 110;
+    const cosSq = Math.max(0.04, cosCut * cosCut);
 
-    // 理想进袋速度 250 mm/s
-    const vEnter = 250;
-    const vObjNeeded = Math.sqrt(vEnter * vEnter + 2 * a * sObj);
-    const vCueContactNeeded = vObjNeeded / cosCut;
-    const vCueInitialNeeded = Math.sqrt(vCueContactNeeded * vCueContactNeeded + 2 * a * sCue);
+    // 目标球保留 250mm 入袋安全缓冲行程（平稳入袋但不暴冲晃袋）
+    const sObjTotal = sObj + 250;
+    // 碰撞瞬间母球所需的等效剩余行进能力
+    const sCueContactNeeded = sObjTotal / cosSq;
+    // 母球从初始击打点到接触点总行程
+    const sCueTotal = sCue + sCueContactNeeded;
 
+    const idealPower = powerByCueTravel(sCueTotal);
     const retention = tipSpeedRetention(tipOffset);
     const elevRetention = resolveV3ElevationRetention(verticalAngle);
-    const maxCenterSpeed = CONFIG.maxCuePowerMmS || 7000;
-    const idealPercent = (vCueInitialNeeded / (maxCenterSpeed * retention * elevRetention)) * 100;
+    const finalPower = idealPower / (Math.max(0.1, retention) * Math.max(0.1, elevRetention));
 
-    return Math.round(clamp(idealPercent, 2, 100));
+    // 安全门控：下限 15%（防台呢微小阻力停球），上限 100%
+    return Math.round(clamp(finalPower, 15, 100));
   }
 
   function predict(state) {
@@ -3385,9 +3473,8 @@
     if (geomPred.target && geomPred.target.pocket) {
       if (power > 2) {
         const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
-        const vObj = effSpeed * cosCut;
-        const maxReachMm = (vObj * vObj) / (2 * CONFIG.clothRollingDecelMmS2);
-        if (maxReachMm < (geomPred.target.pathLengthMm || 0) * 0.92) {
+        const maxReachMm = reachCapFallback(power, cosCut);
+        if (maxReachMm != null && maxReachMm < (geomPred.target.pathLengthMm || 0) * 0.95) {
           insufficientPower = true;
         }
       }
