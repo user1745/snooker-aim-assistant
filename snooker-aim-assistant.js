@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.3
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、瞄准阶段绝对直通保护(彻底修复瞄准时白绿瞄准线偶发不显示Bug/静态瞄准与动态走位擦除彻底解耦)、独占击球走位物理保护锁_shotMotionLocked(彻底根治目标球落袋母球走位时蓝色落位预测线提前消失Bug/全台母球未停绝对不退出走位渲染/全台绝对停稳后才平滑交接)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离(彻底根除新一杆击打时绿色瞄准线完整闪现一次的视觉瑕疵)、低杆真实滑动摩擦阻力模型校准(真实还原强滑移功耗/极限低杆~35%力度精准变绿实线/杜绝25%虚假绿线停球)、母球走位预测线架构重构(过期缓存指纹校验根除初次乱画/0ms瞬时物理走位线60FPS跟手实时响应/45ms时间片节流消灭调力1~2秒卡顿滞后)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.7.4
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、母球走位预测线架构重构、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.3';
+  const SCRIPT_VERSION = '1.7.4';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1465,7 +1465,6 @@
   let _forceShowUntil = 0;
   let _wasInShot = false;
   let _shotMotionLocked = false;
-  let _postShotSettleUntil = 0;
 
   function hasBallVelocity(state) {
     if (!state || !Array.isArray(state.balls)) return false;
@@ -4617,12 +4616,14 @@
   };
 
   /* ================================================================== */
-  /* 击球走位动态擦除与几何裁剪辅助算法 (v1.7.1)                           */
+  /* 击球走位动态擦除与几何裁剪辅助算法 (v1.7.4)                           */
   /* ================================================================== */
 
   let _cueLineCompleted = false;
   let _targetLineCompleted = false;
   let _targetMaxTravel = 0;
+  let _trackedTargetBallId = null;
+  let _trackedTargetPos = null;
 
   function resetCueMotionState() {
     _cueLineCompleted = false;
@@ -4631,19 +4632,26 @@
   function resetTargetMotionState() {
     _targetLineCompleted = false;
     _targetMaxTravel = 0;
+    _trackedTargetBallId = null;
+    _trackedTargetPos = null;
+  }
+
+  function extractBallPos(b) {
+    if (!b) return null;
+    if (b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y)) return { x: b.pos.x, y: b.pos.y };
+    if (Number.isFinite(b.x) && Number.isFinite(b.y)) return { x: b.x, y: b.y };
+    if (b.position && Number.isFinite(b.position.x) && Number.isFinite(b.position.y)) return { x: b.position.x, y: b.position.y };
+    return null;
   }
 
   /**
    * 计算母球瞄准线随母球向前行进的动态裁剪线段：
    * 母球向前滚动时，瞄准线从母球实时球心画到假想球接触点（已走过的后方路径被擦除）；
-   * 当母球撞击目标球（或行进距离达到接触点 - 半径）后，白色瞄准线彻底消失（返回 null）。
+   * 当母球物理行进到达接触点（或大幅侧向偏角走位），白色瞄准线彻底完成消失（返回 null）。
    */
-  function trimCueAimLineFromLive(cueStart, contactEnd, liveCuePos, hasCollided = false) {
+  function trimCueAimLineFromLive(cueStart, contactEnd, liveCuePos) {
     if (!cueStart || !contactEnd) return null;
-    if (_cueLineCompleted || hasCollided) {
-      _cueLineCompleted = true;
-      return null;
-    }
+    if (_cueLineCompleted) return null;
 
     const dx = contactEnd.x - cueStart.x;
     const dy = contactEnd.y - cueStart.y;
@@ -4661,9 +4669,9 @@
     const relY = liveCuePos.y - cueStart.y;
     const t = relX * ux + relY * uy;
 
-    // 若母球偏离瞄准线横向距离过大 (> 45mm)，说明碰撞已发生并产生侧向走位/吃库反弹，白色线彻底消失
+    // 若母球偏离瞄准线横向距离过大 (> 50mm) 且向前有实质位移 (t > 20mm)，说明已撞击目标球并发生侧向走位/吃库反弹，白线彻底完成
     const lateralDistSq = (relX - t * ux) ** 2 + (relY - t * uy) ** 2;
-    if (lateralDistSq > 45 * 45 && t > 10) {
+    if (lateralDistSq > 50 * 50 && t > 20) {
       _cueLineCompleted = true;
       return null;
     }
@@ -4689,11 +4697,11 @@
 
   /**
    * 计算目标球瞄准折线/直线随目标球向前行进的动态裁剪折线：
-   * 目标球被撞动前，保持完整；
-   * 目标球向前行进时，起点跟随目标球推进，后方路径动态擦除；
+   * 目标球被撞动前（母球飞行阶段），100% 完整全长保留；
+   * 目标球受撞向前行进时，起点跟随目标球推进，后方路径动态擦除；
    * 目标球走完现有瞄准线（到达袋口、进袋、或未进袋撞库反弹）后，立即彻底消失，弹库后绝不绘制任何残影。
    */
-  function trimObjectPathFromLive(originalPath, liveTargetPos, isTargetPotted, inMotion = false) {
+  function trimObjectPathFromLive(originalPath, liveTargetPos, isTargetPotted) {
     if (!Array.isArray(originalPath) || originalPath.length < 2) return null;
     // 若已走完或已进袋，永久销毁，杜绝弹库后重新画线
     if (_targetLineCompleted || isTargetPotted) {
@@ -4708,15 +4716,16 @@
       return _targetLineCompleted ? null : originalPath;
     }
 
-    // 判断目标球是否已明显离开初始碰撞点 (> 4mm)
+    // 判断目标球是否已明显离开初始碰撞点 (> 6mm)
     const movedDist = Math.hypot(liveTargetPos.x - startPt.x, liveTargetPos.y - startPt.y);
-    if (movedDist <= 4) {
-      return _targetLineCompleted ? null : originalPath;
+    if (movedDist <= 6) {
+      // 目标球尚未被撞动（母球正向其移动中）：绿色瞄准线 100% 完整保留显示！
+      return originalPath;
     }
 
-    // 1. 到达袋口或路径终点附近 (<= 25mm)，判定为走完
+    // 1. 到达袋口或路径终点附近 (<= 30mm)，判定为走完
     const distToEnd = Math.hypot(liveTargetPos.x - endPt.x, liveTargetPos.y - endPt.y);
-    if (distToEnd <= 25) {
+    if (distToEnd <= 30) {
       _targetLineCompleted = true;
       return null;
     }
@@ -5073,30 +5082,77 @@
         _cueLineCompleted = false;
         _targetLineCompleted = false;
         _targetMaxTravel = 0;
+        _trackedTargetBallId = null;
+        _trackedTargetPos = null;
       }
 
       // 提取母球与目标球的实时球位 (仅在出杆击球 inMotion === true 阶段才读取并用于击球走位动态擦除)
       let liveCuePos = null;
       let liveTargetPos = null;
       let liveTargetPotted = false;
-      const targetBallKind = pred.target?.ball?.kind;
-      const targetBallId = pred.target?.ball?.id;
+      const targetBall = pred.target?.ball || null;
+      const origTargetPos = targetBall?.pos || null;
+      const targetBallKind = targetBall?.kind;
+      const targetBallId = targetBall?.id != null ? String(targetBall.id) : null;
 
       if (inMotion && Array.isArray(currentBalls) && currentBalls.length > 0) {
+        // 1. 查找母球实时位置
         for (const b of currentBalls) {
-          if (!b || !b.pos) continue;
+          if (!b || b.potted) continue;
           if (b.isCue || b.kind === 'cue' || b.kind === 0) {
-            liveCuePos = b.pos;
-          } else if (
-            (targetBallId != null && String(b.id) === String(targetBallId)) ||
-            (targetBallKind != null && b.kind === targetBallKind)
-          ) {
-            liveTargetPos = b.pos;
+            liveCuePos = extractBallPos(b);
+            break;
           }
         }
-        // 如果在当前球列表中找不到目标球，说明目标球已经落袋
-        if (targetBallId != null && !liveTargetPos) {
-          liveTargetPotted = true;
+
+        // 2. 精准查找目标球实时位置（基于唯一ID与初始坐标空间欧氏距离，彻底杜绝红球同色覆盖）
+        let matchedTargetBall = null;
+
+        // 2.1 优先使用已锁定的目标球 ID 或快照目标球 ID 严格匹配
+        const searchId = _trackedTargetBallId || targetBallId;
+        if (searchId != null) {
+          matchedTargetBall = currentBalls.find((b) => b && !b.potted && b.id != null && String(b.id) === String(searchId)) || null;
+        }
+
+        // 2.2 若无 ID 或按 ID 未能匹配到，根据快照初始坐标与历史坐标就近锁定（距离初始点最近的同色球）
+        if (!matchedTargetBall && origTargetPos) {
+          const refPos = _trackedTargetPos || origTargetPos;
+          let bestDist = Infinity;
+          for (const b of currentBalls) {
+            if (!b || b.potted) continue;
+            if (b.isCue || b.kind === 'cue' || b.kind === 0) continue;
+            // 若有类型信息，优先匹配同类型球
+            if (targetBallKind != null && b.kind != null && b.kind !== targetBallKind) continue;
+            const p = extractBallPos(b);
+            if (!p) continue;
+            const d = Math.hypot(p.x - refPos.x, p.y - refPos.y);
+            // 挑选距离参考位置最近的球
+            if (d < bestDist) {
+              bestDist = d;
+              matchedTargetBall = b;
+            }
+          }
+        }
+
+        if (matchedTargetBall) {
+          liveTargetPos = extractBallPos(matchedTargetBall);
+          if (liveTargetPos) {
+            _trackedTargetPos = liveTargetPos;
+            if (matchedTargetBall.id != null) {
+              _trackedTargetBallId = String(matchedTargetBall.id);
+            }
+          }
+          if (matchedTargetBall.potted === true) {
+            liveTargetPotted = true;
+          }
+        } else {
+          // 未在当前台面球列表中找到目标球：只有在目标球曾开始运动且靠近袋口时才算落袋，绝不在第一帧误判落袋！
+          if (_targetMaxTravel > 30 && _trackedTargetPos && t && t.objectPath && t.objectPath.length >= 2) {
+            const endPt = t.objectPath[t.objectPath.length - 1];
+            if (Math.hypot(_trackedTargetPos.x - endPt.x, _trackedTargetPos.y - endPt.y) < 55) {
+              liveTargetPotted = true;
+            }
+          }
         }
       }
 
@@ -5114,12 +5170,7 @@
 
           if (inMotion) {
             // 只有在出杆击球运动中才进行动态实时吞噬裁剪
-            const origTargetPos = t?.ball?.pos;
-            const targetMoved = Boolean(
-              liveTargetPotted ||
-              (origTargetPos && liveTargetPos && Math.hypot(liveTargetPos.x - origTargetPos.x, liveTargetPos.y - origTargetPos.y) > 4)
-            );
-            const trimmed = trimCueAimLineFromLive(cueWorld, contactTarget, liveCuePos, targetMoved);
+            const trimmed = trimCueAimLineFromLive(cueWorld, contactTarget, liveCuePos);
             if (trimmed) {
               startPt = trimmed.start;
               endPt = trimmed.end;
@@ -5162,7 +5213,7 @@
         let pathToDraw = t.objectPath;
         if (inMotion) {
           // 仅在真实出杆运动中执行动态单向擦除与终结销毁
-          pathToDraw = trimObjectPathFromLive(t.objectPath, liveTargetPos, liveTargetPotted, true);
+          pathToDraw = trimObjectPathFromLive(t.objectPath, liveTargetPos, liveTargetPotted);
         }
 
         if (pathToDraw && pathToDraw.length >= 2) {
@@ -5244,7 +5295,7 @@
         }
       }
 
-      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线，击球走位全程100%完整保留，绝不擦除)
+      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线，击球走位全程100%完整保留，绝不擦除；彻底移除终点白色假想球圆圈)
       if (CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
         const pxPts = pred.cuePostTrajectory.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
         if (pxPts.length >= 2) {
@@ -5263,11 +5314,6 @@
           }
           ctx.stroke();
           ctx.restore();
-
-          // 终点绘制母球落位幽灵球圈
-          if (CONFIG.showGhostStopPosition && pred.cueRestPos) {
-            this.drawGhostBall(pred.cueRestPos, cueWorld);
-          }
         }
       }
 
@@ -6446,11 +6492,15 @@
         const autoRecover = (now - _shotHiddenSince > 18000);
 
         if (still) {
-          // 全台所有球（母球及目标球）完全停稳！解除出杆走位保护锁
+          // 全台所有球（包含母球）彻底完全静止！立即解除走位保护锁，彻底销毁上一杆走位预测线，绝无 600ms 滞留延迟
           _shotMotionLocked = false;
           _wasInShot = false;
-          _postShotSettleUntil = performance.now() + 600; // 停球后保留 600ms 比对母球落位
+          _lastShotPred = null;
           _shotHiddenSince = 0;
+          resetTargetMotionState();
+          resetCueMotionState();
+          _lastRenderKey = null;
+          overlay.clear(); // 蓝色预测线瞬间清空消失，零毫秒等待！
           _settledRawPower = extractRawStatePower(state);
         } else {
           // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
@@ -6458,9 +6508,13 @@
           if (autoRecover) {
             _shotMotionLocked = false;
             _wasInShot = false;
+            _lastShotPred = null;
             _shotHiddenSince = 0;
+            resetTargetMotionState();
+            resetCueMotionState();
+            overlay.clear();
           } else if (!forceShow) {
-            // 出杆击球走位中：母球走位预测线与落位幽灵球持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
+            // 出杆击球走位中：母球走位预测线持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
             const predToDraw = _lastShotPred || _lastFullPred;
             if (predToDraw) {
               overlay.drawPrediction(predToDraw, state?.balls, true /* inMotion */);
@@ -6485,7 +6539,11 @@
         if (_wasInShot) {
           _wasInShot = false;
           _shotMotionLocked = false;
-          _postShotSettleUntil = performance.now() + 600; // 停球后保留 600ms 比对母球落位
+          _lastShotPred = null;
+          resetTargetMotionState();
+          resetCueMotionState();
+          _lastRenderKey = null;
+          overlay.clear();
           _turnPowerActive = false;
           _turnHasInteracted = false;
           _settledRawPower = extractRawStatePower(state);
@@ -6494,25 +6552,6 @@
       }
 
       DailyChallengeEngine.onFrame(state, shot, still);
-
-      // 检查后置静止展示期（展示上一杆母球实际停位与预测停位对比）
-      // 若用户已开始瞄准新一杆（存在有效瞄准方向或拉杆交互），提前结束展示期，立即进入新一杆瞄准
-      const userStartedAiming = Boolean(state && state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x));
-      const inPostSettleWindow = (performance.now() < _postShotSettleUntil) && !userStartedAiming;
-      if (inPostSettleWindow && _lastShotPred) {
-        overlay.drawPrediction(_lastShotPred, state?.balls, true /* inMotion */);
-        scheduleNextFrame(false);
-        return;
-      }
-
-      // 静止比对期结束，彻底销毁上一杆旧快照与运动状态，严防新一杆闪现旧瞄准线！
-      if (_postShotSettleUntil > 0 && (performance.now() >= _postShotSettleUntil || userStartedAiming)) {
-        _lastShotPred = null;
-        _postShotSettleUntil = 0;
-        resetTargetMotionState();
-        resetCueMotionState();
-        _lastRenderKey = null;
-      }
 
       const keys = buildStateKeys(state);
       if (!keys) {
