@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.0
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(双指双击/全台自由选球/100%满力击球/死局冲球解围/连续清台)、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.1
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台自由选球/100%满力击球/死局冲球解围/连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -865,7 +865,6 @@
     '排名赛',
     '排位赛',
     '每日签到',
-    '每日挑战',
     '创建房间',
     '加入房间',
     '对战大厅',
@@ -909,6 +908,7 @@
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.id === 'snooker-aim-toast' || (el.closest && el.closest('.snooker-aim-toast'))) continue;
       if (el.children && el.children.length > 3) continue;
       const txt = (el.textContent || '').trim();
       if (!txt || txt.length > 25) continue;
@@ -991,6 +991,7 @@
     for (let i = 0; i < modalNodes.length; i++) {
       const el = modalNodes[i];
       if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.id === 'snooker-aim-toast' || (el.closest && el.closest('.snooker-aim-toast'))) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width > 140 && rect.height > 90) {
         try {
@@ -1007,6 +1008,7 @@
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.id === 'snooker-aim-toast' || (el.closest && el.closest('.snooker-aim-toast'))) continue;
       if (el.children && el.children.length > 3) continue;
       const txt = (el.textContent || '').trim();
       if (!txt || txt.length > 25) continue;
@@ -1029,6 +1031,7 @@
     for (let i = 0; i < loadContainers.length; i++) {
       const el = loadContainers[i];
       if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.id === 'snooker-aim-toast' || (el.closest && el.closest('.snooker-aim-toast'))) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width > 50 && rect.height > 50) {
         try {
@@ -1043,6 +1046,7 @@
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       if (el.id === 'snooker-aim-panel' || (el.closest && el.closest('#snooker-aim-panel'))) continue;
+      if (el.id === 'snooker-aim-toast' || (el.closest && el.closest('.snooker-aim-toast'))) continue;
       if (el.children && el.children.length > 2) continue;
       const txt = (el.textContent || '').trim().toLowerCase();
       if (!txt || txt.length > 25) continue;
@@ -1062,9 +1066,9 @@
     if (!state || !Array.isArray(state.balls) || state.balls.length === 0) return false;
     const hasCue = state.balls.some((b) => b && !b.potted && (b.kind === 'cue' || b.id === state.cueBallId));
     const activeObjs = activeObjectBalls(state);
-    const hasAim = Boolean(state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x));
+    const hasAimOrMoving = Boolean(state.aim && state.aim.direction && Number.isFinite(state.aim.direction.x)) || isShotOrMoving(state);
     const notOver = !(state.isOver || state.gameOver || state.frameOver || state.isSettlement || state.isFinished || state.finished);
-    return hasCue && hasAim && activeObjs.length > 0 && notOver;
+    return hasCue && hasAimOrMoving && activeObjs.length > 0 && notOver;
   }
 
   function isSettlementOrGameOverScreen(state) {
@@ -1269,6 +1273,8 @@
     const hostDoc = (window.top && (() => { try { return window.top.document; } catch (_) { return null; } })()) || document;
     if (!hostDoc || !hostDoc.body) return;
     const toast = hostDoc.createElement('div');
+    toast.id = 'snooker-aim-toast';
+    toast.className = 'snooker-aim-toast';
     toast.style.cssText = [
       'position:fixed;left:50%;bottom:50px;transform:translateX(-50%);',
       'z-index:2147483648;background:rgba(10,18,12,0.92);color:#f0f4ee;',
@@ -1442,6 +1448,11 @@
         const vz = Number(v.z) || 0;
         // 速度阈值设为 12 mm/s (平方 144)，排除物理引擎浮点静态微漂移，精确捕获真实击球
         if ((vx * vx + vy * vy + vz * vz) > 144) return true;
+      } else if (Number.isFinite(b.vx) || Number.isFinite(b.vy) || Number.isFinite(b.vz)) {
+        const vx = Number(b.vx) || 0;
+        const vy = Number(b.vy) || 0;
+        const vz = Number(b.vz) || 0;
+        if ((vx * vx + vy * vy + vz * vz) > 144) return true;
       }
     }
     return false;
@@ -1455,11 +1466,14 @@
     let moved = false;
     let count = 0;
     state.balls.forEach((b, i) => {
-      if (!b || b.potted || !b.pos || !Number.isFinite(b.pos.x)) return;
+      if (!b || b.potted) return;
+      const px = (b.pos && Number.isFinite(b.pos.x)) ? b.pos.x : (Number.isFinite(b.x) ? b.x : null);
+      const py = (b.pos && Number.isFinite(b.pos.y)) ? b.pos.y : (Number.isFinite(b.y) ? b.y : null);
+      if (px === null || py === null) return;
       const key = b.id != null ? String(b.id) : `${b.kind || 'ball'}:${i}`;
       const prev = _lastBallPositions.get(key);
-      if (prev && V.dist(prev, b.pos) > 0.4) moved = true;
-      _lastBallPositions.set(key, { x: b.pos.x, y: b.pos.y });
+      if (prev && Math.hypot(prev.x - px, prev.y - py) > 0.4) moved = true;
+      _lastBallPositions.set(key, { x: px, y: py });
       count++;
     });
     if (!count) return false;
@@ -1474,11 +1488,14 @@
   function isShotOrMoving(state) {
     if (!state) return false;
     // 1. 物理引擎真实击球滚动中标志
-    if (state.inPlay === true || state.isRolling === true || state.ballMoving === true) {
+    if (state.inPlay === true || state.isRolling === true || state.ballMoving === true || state.shotInProgress === true) {
       return true;
     }
     // 2. 真实出杆击打中的状态，严格排除包含 'move' / 'anim' 等相机旋转或手势调整视角的关键词
-    const phase = String(state.phase || state.status || state.gameState || state.state || '').toLowerCase();
+    const phase = String(
+      state.phase || state.status || state.gameState || state.state ||
+      state.shot?.phase || state.shot?.status || state.shot?.state || ''
+    ).toLowerCase();
     if (phase) {
       const activeShotPhases = ['shot', 'shooting', 'rolling', 'ballrolling', 'inplay'];
       if (activeShotPhases.some((p) => phase === p || phase.startsWith(p + '_') || phase.startsWith(p + '-'))) {
@@ -2287,6 +2304,9 @@
 
       this.running = true;
       this.step = 'idle';
+      if (ui && typeof ui.updateDailyChallengeBtn === 'function') {
+        ui.updateDailyChallengeBtn();
+      }
       showToast('🚀 每日挑战自动化击球已启动', 1500);
       this.scheduleNextShot(50);
     },
@@ -2297,6 +2317,9 @@
       if (this.timer) {
         clearTimeout(this.timer);
         this.timer = null;
+      }
+      if (ui && typeof ui.updateDailyChallengeBtn === 'function') {
+        ui.updateDailyChallengeBtn();
       }
       if (reason) {
         showToast(reason, 1500);
@@ -2421,11 +2444,8 @@
 
       const dist = Math.hypot(clientX - _lastScreenTapPos.x, clientY - _lastScreenTapPos.y);
 
+      // 位移过大(超过 30px)判定为滑屏瞄准，重置点击计数
       if (dist >= 30) {
-        if (_pendingDoubleTapTimer) {
-          clearTimeout(_pendingDoubleTapTimer);
-          _pendingDoubleTapTimer = null;
-        }
         _screenTapCount = 1;
         _lastScreenTapTime = now;
         _lastScreenTapPos = { x: clientX, y: clientY };
@@ -2441,81 +2461,20 @@
       _lastScreenTapTime = now;
       _lastScreenTapPos = { x: clientX, y: clientY };
 
-      if (_screenTapCount === 1) {
-        if (_pendingDoubleTapTimer) {
-          clearTimeout(_pendingDoubleTapTimer);
-          _pendingDoubleTapTimer = null;
-        }
-      } else if (_screenTapCount === 2) {
-        // 双击等待窗口 (220ms)
-        if (_pendingDoubleTapTimer) {
-          clearTimeout(_pendingDoubleTapTimer);
-          _pendingDoubleTapTimer = null;
-        }
-        _pendingDoubleTapTimer = setTimeout(() => {
-          _pendingDoubleTapTimer = null;
-          _screenTapCount = 0;
-          if (CONFIG.doubleClickAlign) {
-            DailyChallengeEngine.toggle();
-            try { if (navigator.vibrate) navigator.vibrate(25); } catch (_) {}
-          }
-        }, 220);
-      } else if (_screenTapCount >= 3) {
-        // 第三击：触发三击屏幕控制面板加号圆圈隐藏/重新显示！
-        if (_pendingDoubleTapTimer) {
-          clearTimeout(_pendingDoubleTapTimer);
-          _pendingDoubleTapTimer = null;
-        }
+      // 单指双击屏幕：显隐控制面板加号圆圈！
+      if (_screenTapCount === 2) {
         _screenTapCount = 0;
         _lastScreenTapTime = 0;
         togglePanelCircleVisibility();
-        try { if (navigator.vibrate) navigator.vibrate([30, 40, 30]); } catch (_) {}
+        try { if (navigator.vibrate) navigator.vibrate([25, 35]); } catch (_) {}
       }
     };
 
-    // 1. 监听 touchstart：多点触控与双指双击判定
+    // 1. 监听 touchstart (单指双击显隐控制面板)
     doc.addEventListener('touchstart', (e) => {
-      if (!e.touches) return;
-
-      // 【核心特性】双指双击屏幕触发每日挑战自动化击球 (启动/暂停)
-      if (e.touches.length === 2) {
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        if ((t1.target && t1.target.closest && t1.target.closest('#snooker-aim-panel')) ||
-            (t2.target && t2.target.closest && t2.target.closest('#snooker-aim-panel'))) {
-          return;
-        }
-
-        const now = performance.now();
-        const cx = (t1.clientX + t2.clientX) / 2;
-        const cy = (t1.clientY + t2.clientY) / 2;
-        const dt = now - _lastTwoFingerTapTime;
-        const dist = Math.hypot(cx - _lastTwoFingerTapPos.x, cy - _lastTwoFingerTapPos.y);
-
-        if (dt >= 40 && dt <= 380 && dist < 50) {
-          _twoFingerTapCount++;
-        } else {
-          _twoFingerTapCount = 1;
-        }
-
-        _lastTwoFingerTapTime = now;
-        _lastTwoFingerTapPos = { x: cx, y: cy };
-
-        if (_twoFingerTapCount >= 2) {
-          _twoFingerTapCount = 0;
-          _lastTwoFingerTapTime = 0;
-          if (CONFIG.doubleClickAlign) {
-            DailyChallengeEngine.toggle();
-            try { if (navigator.vibrate) navigator.vibrate([30, 50, 30]); } catch (_) {}
-          }
-        }
-        return;
-      }
-
-      if (e.touches.length === 1) {
-        const touch = e.touches[0];
-        handleTap(touch.clientX, touch.clientY, e.target);
-      }
+      if (!e.touches || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      handleTap(touch.clientX, touch.clientY, e.target);
     }, { passive: true, capture: true });
 
     // 2. 监听 pointerdown (覆盖鼠标单指/笔触)
@@ -2745,14 +2704,19 @@
   function activeObjectBalls(state) {
     if (!state || !Array.isArray(state.balls)) return [];
     return state.balls.filter(
-      (b) => b && b.kind !== 'cue' && !b.potted && b.pos && Number.isFinite(b.pos.x)
+      (b) => b && b.kind !== 'cue' && !b.potted && (
+        (b.pos && Number.isFinite(b.pos.x)) || Number.isFinite(b.x)
+      )
     );
   }
 
   function activeAllBalls(state) {
     if (!state || !Array.isArray(state.balls)) return [];
     return state.balls.filter(
-      (b) => b && !b.potted && b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y)
+      (b) => b && !b.potted && (
+        (b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y)) ||
+        (Number.isFinite(b.x) && Number.isFinite(b.y))
+      )
     );
   }
 
@@ -4853,6 +4817,57 @@
       ].join(' ');
       this.panel.appendChild(this.body);
 
+      // 【每日挑战自动化击球】专属控制按钮 (仅通过按钮或空格键启停)
+      const dailyBtn = document.createElement('button');
+      dailyBtn.id = 'snooker-daily-challenge-btn';
+      dailyBtn.type = 'button';
+      this.dailyChallengeBtn = dailyBtn;
+
+      this.updateDailyChallengeBtn = () => {
+        if (!this.dailyChallengeBtn) return;
+        const isRunning = Boolean(typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine && DailyChallengeEngine.running);
+        if (isRunning) {
+          this.dailyChallengeBtn.textContent = '⏸️ 暂停每日挑战自动击球';
+          this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)';
+          this.dailyChallengeBtn.style.color = '#ffffff';
+          this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(255, 77, 79, 0.5)';
+        } else {
+          this.dailyChallengeBtn.textContent = '🚀 启动每日挑战自动击球';
+          this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #00b05b 0%, #00ff88 100%)';
+          this.dailyChallengeBtn.style.color = '#081726';
+          this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(0, 255, 136, 0.4)';
+        }
+      };
+
+      dailyBtn.style.cssText = [
+        'width: 100% !important;',
+        'padding: 8px 10px !important;',
+        'margin: 2px 0 8px 0 !important;',
+        'border: none !important;',
+        'border-radius: 6px !important;',
+        'font-size: 12.5px !important;',
+        'font-weight: 700 !important;',
+        'cursor: pointer !important;',
+        'text-align: center !important;',
+        'display: flex !important;',
+        'align-items: center !important;',
+        'justify-content: center !important;',
+        'letter-spacing: 0.5px !important;',
+        'transition: all 0.2s ease !important;',
+        'user-select: none !important;',
+      ].join(' ');
+
+      dailyBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine) {
+          DailyChallengeEngine.toggle();
+        }
+        this.updateDailyChallengeBtn();
+      };
+      this.updateDailyChallengeBtn();
+      this.body.appendChild(dailyBtn);
+
       const row = (label, key) => {
         const div = document.createElement('label');
         div.style.cssText = [
@@ -4994,12 +5009,11 @@
       methodRow.append(methodLabel, segBox);
       this.body.appendChild(methodRow);
 
-      row('双指双击每日挑战自动击球', 'doubleClickAlign');
       row('信息浮标', 'showHudPill');
       row('调试信息', 'showDebug');
 
       const tipHint = document.createElement('div');
-      tipHint.textContent = '💡 提示: 双指双击屏幕触发每日挑战自动击球 (空格键启动/暂停，三击隐藏面板)';
+      tipHint.textContent = '💡 提示: 单指双击屏幕可隐藏/重新显示控制面板 (空格键亦可启停自动击球)';
       tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
       this.body.appendChild(tipHint);
 
@@ -5498,6 +5512,7 @@
   }
 
   let _lastFrameCleanTime = 0;
+  let _nonTableFrames = 0;
 
   function frame() {
     try {
@@ -5536,14 +5551,16 @@
       projection.init();
 
       const hasCanvas = Boolean(projection.canvas && isCanvasActuallyVisible(projection.canvas));
-      const inLobby = isLobbyMenuVisible();
-      const rawState = (hasCanvas && !inLobby) ? extractRawState() : null;
-      const isSettlement = inLobby ? false : isSettlementOrGameOverScreen(rawState);
-      const isLoading = inLobby ? false : isLoadingScreen(rawState);
-      const inLobbyOrSettlementOrLoading = inLobby || isSettlement || isLoading;
+      const rawState = hasCanvas ? extractRawState() : null;
+      const isPlayable = isPlayableTableState(rawState);
+      const inLobby = isPlayable ? false : isLobbyMenuVisible();
+      const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
+      const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
+      const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
       const state = (hasCanvas && !inLobbyOrSettlementOrLoading) ? rawState : null;
 
       if (!hasCanvas || !state || inLobbyOrSettlementOrLoading) {
+        _nonTableFrames++;
         if (overlay.canvas) {
           overlay.clear();
           if (!hasCanvas) overlay.destroy();
@@ -5555,7 +5572,7 @@
         _wasInShot = false;
         _shotHiddenSince = 0;
         resetTurnPowerState();
-        if (DailyChallengeEngine.running) {
+        if (DailyChallengeEngine.running && _nonTableFrames > 25) {
           DailyChallengeEngine.stop('离开球桌或对局结束，已退出自动化击球');
         }
 
@@ -5573,6 +5590,8 @@
         scheduleNextFrame(true);
         return;
       }
+
+      _nonTableFrames = 0;
 
       if (projection.canvas.ownerDocument) {
         bindKeyboardShortcuts(projection.canvas.ownerDocument);
@@ -5730,7 +5749,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.6.0',
+      version: '1.6.1',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
