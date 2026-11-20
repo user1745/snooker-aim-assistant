@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.4
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台红球优先/智能力度击球/红球堆冲球解围/两阶段连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.5
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM悬浮胶囊化(解决遮挡与显示异常)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球(面板专属按钮/全台红球优先/智能力度击球/红球堆冲球解围/两阶段连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.4';
+  const SCRIPT_VERSION = '1.6.5';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -2107,7 +2107,7 @@
     _lastRenderKey = null;
 
     let targetDesc = '';
-    const strikePower = isBreakup ? 100 : clamp(chosenRoute.recommendedPower || 50, 15, 100);
+    const strikePower = isBreakup ? 100 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
 
     if (isBreakup) {
       targetDesc = hasReds
@@ -3196,7 +3196,7 @@
     return mm > 0 ? clamp(mm, 60, 6000) : null;
   }
 
-  // 4. 最佳入袋推荐出杆力度计算（基于 3.4.2 实测动力学模型与能量守恒）
+  // 4. 最佳入袋推荐出杆力度计算（基于 3.4.2 实测动力学模型、碰撞能量损耗补偿与防停球动力学）
   function calculateRecommendedPower(cuePos, contactPos, targetBallPos, pocketPos, aimDir, tipOffset, verticalAngle) {
     const sObj = V.dist(targetBallPos, pocketPos);
     const sCue = V.dist(cuePos, contactPos);
@@ -3204,10 +3204,12 @@
     const cosCut = clamp(V.dot(aimDir, normal), 0.08, 1);
     const cosSq = Math.max(0.04, cosCut * cosCut);
 
-    // 目标球保留 250mm 入袋安全缓冲行程（平稳入袋但不暴冲晃袋）
-    const sObjTotal = sObj + 250;
-    // 碰撞瞬间母球所需的等效剩余行进能力
-    const sCueContactNeeded = sObjTotal / cosSq;
+    // 目标球保留 680mm 扎实入袋安全缓冲行程（确保平稳入袋底、不卡袋口；长台自适应追加补偿）
+    const distExtra = sObj > 1000 ? Math.min(300, (sObj - 1000) * 0.15) : 0;
+    const sObjTotal = sObj + 680 + distExtra;
+
+    // 碰撞瞬间母球所需的等效剩余行进能力（计入球球非完全弹性恢复与切向摩擦损耗 η ≈ 0.88）
+    const sCueContactNeeded = (sObjTotal / cosSq) / 0.88;
     // 母球从初始击打点到接触点总行程
     const sCueTotal = sCue + sCueContactNeeded;
 
@@ -3216,8 +3218,11 @@
     const elevRetention = resolveV3ElevationRetention(verticalAngle);
     const finalPower = idealPower / (Math.max(0.1, retention) * Math.max(0.1, elevRetention));
 
-    // 安全门控：下限 15%（防台呢微小阻力停球），上限 100%
-    return Math.round(clamp(finalPower, 15, 100));
+    // 安全门控：短距离最低 22%（彻底根治 15% 软绵无力停在袋口），中长台根据总射程平滑提升至 28%~35%
+    const totalDist = sCue + sObj;
+    const minPowerFloor = clamp(22 + Math.round(Math.max(0, totalDist - 1000) / 100), 22, 35);
+
+    return Math.round(clamp(finalPower, minPowerFloor, 100));
   }
 
   function predict(state) {
@@ -3507,14 +3512,15 @@
       const remainCueTravel = Math.max(0, totalCueTravel - sCue);
 
       const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
-      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗）
-      actualReachMm = remainCueTravel * (cosCut * cosCut);
+      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗与碰撞传递衰减 0.88）
+      actualReachMm = remainCueTravel * (cosCut * cosCut) * 0.88;
 
       const targetPathLen = Number(geomPred.target.pathLengthMm) ||
         (geomPred.target.pocket ? V.dist(geomPred.target.ball.pos, geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : 0);
 
       if (power > 2 && targetPathLen > 0) {
-        if (actualReachMm < targetPathLen * 0.96) {
+        // 当实际可达距离不足以到达袋口并具备 200mm 入袋余量时，判定为力度不足
+        if (actualReachMm < targetPathLen + 200) {
           insufficientPower = true;
         }
       }
@@ -3938,6 +3944,146 @@
   }
 
   /* ================================================================== */
+  /* 信息浮标 HUD Pill 顶层原生 DOM 悬浮胶囊 (解决遮挡、清屏与显示异常)      */
+  /* ================================================================== */
+
+  const hudPill = {
+    el: null,
+    dotEl: null,
+    textEl: null,
+    _lastText: '',
+    _lastColor: '',
+    _visible: false,
+
+    getTargetDoc() {
+      if (typeof overlay !== 'undefined' && overlay.getTargetDoc) {
+        return overlay.getTargetDoc();
+      }
+      return (projection.canvas && projection.canvas.ownerDocument) || document;
+    },
+
+    ensure() {
+      const targetDoc = this.getTargetDoc();
+      if (!targetDoc || !targetDoc.body) return;
+
+      if (this.el && this.el.isConnected && this.el.ownerDocument === targetDoc) {
+        return;
+      }
+
+      // 移除残留旧节点保障绝对单例
+      try {
+        targetDoc.querySelectorAll('#snooker-aim-hud-pill').forEach((e) => e.remove());
+      } catch (_) {}
+
+      const el = targetDoc.createElement('div');
+      el.id = 'snooker-aim-hud-pill';
+      el.style.cssText = [
+        'position: fixed !important',
+        'top: 14px !important',
+        'left: 50% !important',
+        'transform: translateX(-50%) !important',
+        'z-index: 2147483647 !important',
+        'pointer-events: none !important',
+        'user-select: none !important',
+        '-webkit-user-select: none !important',
+        'display: none',
+        'align-items: center !important',
+        'justify-content: center !important',
+        'padding: 3px 12px 3px 9px !important',
+        'height: 24px !important',
+        'box-sizing: border-box !important',
+        'border-radius: 12px !important',
+        'background: rgba(12, 24, 18, 0.92) !important',
+        'backdrop-filter: blur(8px) !important',
+        '-webkit-backdrop-filter: blur(8px) !important',
+        'border: 1px solid #00ff88 !important',
+        'box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), 0 0 10px rgba(0, 255, 136, 0.25) !important',
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif !important',
+        'font-size: 11px !important',
+        'font-weight: 600 !important',
+        'color: #f2f7f2 !important',
+        'white-space: nowrap !important',
+        'transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease !important',
+        'opacity: 0',
+      ].join(';');
+
+      const dot = targetDoc.createElement('span');
+      dot.style.cssText = [
+        'width: 6.5px !important',
+        'height: 6.5px !important',
+        'border-radius: 50% !important',
+        'background: #00ff88 !important',
+        'margin-right: 7px !important',
+        'flex-shrink: 0 !important',
+        'box-shadow: 0 0 6px #00ff88 !important',
+        'transition: background 0.15s ease, box-shadow 0.15s ease !important',
+      ].join(';');
+
+      const txt = targetDoc.createElement('span');
+      txt.style.cssText = [
+        'line-height: 1 !important',
+        'letter-spacing: 0.3px !important',
+      ].join(';');
+
+      el.appendChild(dot);
+      el.appendChild(txt);
+      targetDoc.body.appendChild(el);
+
+      this.el = el;
+      this.dotEl = dot;
+      this.textEl = txt;
+      this._lastText = '';
+      this._lastColor = '';
+      this._visible = false;
+    },
+
+    show(text, accentColor) {
+      if (!CONFIG.showHudPill || !text) {
+        this.hide();
+        return;
+      }
+      this.ensure();
+      if (!this.el) return;
+
+      const color = accentColor || CONFIG.pocketRingColor || '#00ff88';
+      if (this._lastText !== text) {
+        this.textEl.textContent = text;
+        this._lastText = text;
+      }
+      if (this._lastColor !== color) {
+        this.el.style.borderColor = color;
+        this.el.style.boxShadow = `0 4px 14px rgba(0, 0, 0, 0.4), 0 0 10px ${color}44`;
+        this.dotEl.style.background = color;
+        this.dotEl.style.boxShadow = `0 0 6px ${color}`;
+        this._lastColor = color;
+      }
+      if (!this._visible) {
+        this.el.style.display = 'inline-flex';
+        void this.el.offsetWidth;
+        this.el.style.opacity = '1';
+        this._visible = true;
+      }
+    },
+
+    hide() {
+      if (!this.el || !this._visible) return;
+      this.el.style.opacity = '0';
+      this.el.style.display = 'none';
+      this._visible = false;
+    },
+
+    destroy() {
+      if (this.el) {
+        try { this.el.remove(); } catch (_) {}
+      }
+      this.el = null;
+      this.dotEl = null;
+      this.textEl = null;
+      this._visible = false;
+    }
+  };
+
+  /* ================================================================== */
   /* overlay 画布与高清渲染层                                            */
   /* ================================================================== */
 
@@ -4185,7 +4331,16 @@
     },
 
     drawTopHudPill(text, accentColor) {
-      if (!CONFIG.showHudPill || !text || !this.ctx || !this.canvas) return;
+      if (!CONFIG.showHudPill || !text) {
+        hudPill.hide();
+        return;
+      }
+
+      // 1. 优先调用顶层原生 DOM 悬浮胶囊，保证 100% 常驻置顶显示、抗锯齿且不被清屏遮挡
+      hudPill.show(text, accentColor);
+
+      // 2. 同时在 Canvas 2D 层绘制作为底层视觉贴合
+      if (!this.ctx || !this.canvas) return;
       const ctx = this.ctx;
       const canvasW = this.rect ? this.rect.width : (this.canvas.width / (this.dpr || 1));
       const canvasH = this.rect ? this.rect.height : (this.canvas.height / (this.dpr || 1));
@@ -4239,11 +4394,20 @@
       const ctx = this.ctx;
       if (!ctx) return false;
       this.clear();
-      if (!pred) return false;
+      if (!pred) {
+        hudPill.hide();
+        return false;
+      }
 
       const cueWorld = pred.cue;
       const aimDir = pred.aimDir;
-      if (!cueWorld || !aimDir) return false;
+      if (!cueWorld || !aimDir) {
+        hudPill.hide();
+        return false;
+      }
+
+      // 核心修复：直接在入口最顶部声明计算当前有效出杆力度，彻底根除后续使用时的 TDZ ReferenceError 异常！
+      const currentEffPower = Math.max(0, Math.round(Number(pred.shot?.power ?? pred.power ?? 0)));
 
       const t = pred.target || null;
 
@@ -4319,8 +4483,6 @@
           ctx.restore();
         }
       }
-
-      const currentEffPower = Math.max(0, Math.round(Number(pred.shot?.power ?? pred.power ?? 0)));
 
       // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px (未出杆/力度为0时不绘制)
       if (currentEffPower > 0 && CONFIG.showCushionRebound && pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) && pred.cuePost.cueCushionPaths.length > 0) {
@@ -4398,10 +4560,6 @@
         }
       }
 
-      if ((CONFIG.showCueLine || CONFIG.showObjectLine || CONFIG.showCuePostTrajectory) && !hasProjected) {
-        return false;
-      }
-
       // 4) 反向擦除所有遮挡瞄准线的球体 3D 投影区域
       const allBalls = Array.isArray(pred.balls) && pred.balls.length
         ? pred.balls
@@ -4456,7 +4614,15 @@
             `直吃${cushionName} (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
             '#86cfff'
           );
+        } else {
+          hudPill.hide();
         }
+      } else {
+        hudPill.hide();
+      }
+
+      if ((CONFIG.showCueLine || CONFIG.showObjectLine || CONFIG.showCuePostTrajectory) && !hasProjected) {
+        return false;
       }
 
       return true;
@@ -4897,6 +5063,9 @@
         cb.onchange = () => {
           if (performance.now() < this._suppressClickUntil) return;
           CONFIG[key] = cb.checked;
+          if (key === 'showHudPill' && !cb.checked) {
+            hudPill.hide();
+          }
           saveToggles();
         };
         this._checkboxes[key] = cb;
@@ -5418,6 +5587,13 @@
         if (el !== overlay.canvas) el.remove();
       }
     }
+
+    const pills = targetDoc.querySelectorAll('#snooker-aim-hud-pill');
+    if (pills.length > 1 && hudPill.el) {
+      for (const el of pills) {
+        if (el !== hudPill.el) el.remove();
+      }
+    }
   }
 
   function scheduleNextFrame(idle) {
@@ -5538,6 +5714,11 @@
           _lastRenderKey = null;
           _lastFullPred = null;
           ui.updateDebug(null, false, '击球进行中...');
+          if (DailyChallengeEngine.running) {
+            hudPill.show('🤖 自动化击球进行中 · 目标球走位中...', '#00ff88');
+          } else {
+            hudPill.hide();
+          }
           scheduleNextFrame(false);
           return;
         }
@@ -5562,6 +5743,7 @@
       const keys = buildStateKeys(state);
       if (!keys) {
         if (overlay.canvas) overlay.clear();
+        hudPill.hide();
         _lastRenderKey = null;
         scheduleNextFrame(false);
         return;
@@ -5691,6 +5873,8 @@
       hasVisibleDarkMaskInDoc,
       hasVisibleSettlementUiInDoc,
       isLobbyMenuVisible,
+      calculateRecommendedPower,
+      hudPill,
       overlay,
       projection,
       NativeWorkerBridge,
