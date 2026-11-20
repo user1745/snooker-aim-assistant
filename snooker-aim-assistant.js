@@ -4590,9 +4590,9 @@
       const next = !this.circleHidden;
       this.setCircleHidden(next);
       if (next) {
-        showToast('🙈 控制面板加号已隐藏 (三击屏幕重新显示)', 1800);
+        showToast('🙈 控制面板加号已隐藏 (双击屏幕重新显示)', 1800);
       } else {
-        showToast('👁️ 控制面板加号已显示', 1500);
+        showToast('👁️ 控制面板加号已显示 (双击屏幕重新隐藏)', 1500);
       }
       return this.circleHidden;
     },
