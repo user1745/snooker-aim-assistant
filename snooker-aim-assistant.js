@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.5
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM悬浮胶囊化(解决遮挡与显示异常)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球(面板专属按钮/全台红球优先/智能力度击球/红球堆冲球解围/两阶段连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.6
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、智能开球与死局冲球解围算法(严格首碰合法性校验/绕过蓝球外侧通视通道/杜绝误击蓝球犯规/65%可控稳健冲球)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.5';
+  const SCRIPT_VERSION = '1.6.6';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -2023,29 +2023,75 @@
       }
     }
 
-    // 优先级 3: 【死局解围策略】：若全台没有任何可下球路线，直接以 100% 满力击打任意无阻挡球打散球堆
+    // 优先级 3: 【死局冲球/解围策略】：全台无直接进袋路线时，寻找合法首碰目标球并冲散球堆
     if (!chosenRoute) {
-      let bestBreakupBall = null;
-      let minBreakupDist = Infinity;
+      // 物理射线检测首碰球 (First Contact Ball)
+      const getFirstContactBall = (dir) => {
+        if (!dir || (dir.x === 0 && dir.y === 0)) return null;
+        let minHitT = Infinity;
+        let hitBall = null;
+        let hitContact = null;
+        for (const b of objects) {
+          const rc = rayContact(cue.pos, dir, b);
+          if (rc && rc.tHit < minHitT) {
+            minHitT = rc.tHit;
+            hitBall = b;
+            hitContact = rc.G;
+          }
+        }
+        return hitBall ? { ball: hitBall, tHit: minHitT, contact: hitContact } : null;
+      };
+
+      const isLegalTarget = (b) => candidateBalls.some((cb) => cb.id === b.id);
+      let bestBreakup = null;
+      let bestBreakupScore = -Infinity;
+
+      // 阶段 3.1: 遍历合法候选球，直瞄及多角度掠射采样（覆盖避开中台蓝球/粉球的侧向净空通道）
       for (const b of candidateBalls) {
-        if (!pathBlocked(cue.pos, b.pos, objects, b.id, cue.id)) {
-          const dist = V.dist(cue.pos, b.pos);
-          if (dist < minBreakupDist) {
-            minBreakupDist = dist;
-            bestBreakupBall = b;
+        const baseDir = V.norm(V.sub(b.pos, cue.pos));
+        const baseAngle = Math.atan2(baseDir.y, baseDir.x);
+
+        // 采样角度：0度(直瞄球心) 以及左右偏移采样（从 2度 到 18度，覆盖绕过中台蓝球/粉球的切线通道）
+        const testAngles = [0, -0.035, 0.035, -0.07, 0.07, -0.12, 0.12, -0.18, 0.18, -0.25, 0.25, -0.32, 0.32];
+        for (const delta of testAngles) {
+          const ang = baseAngle + delta;
+          const dir = { x: Math.cos(ang), y: Math.sin(ang) };
+          const fc = getFirstContactBall(dir);
+          // 核心法则：严禁首碰彩球！首碰球必须严格为合法目标球集合（即红球）中的球
+          if (fc && isLegalTarget(fc.ball)) {
+            const contactNormal = V.norm(V.sub(fc.ball.pos, fc.contact));
+            const cutCos = clamp(V.dot(dir, contactNormal), 0.1, 1);
+            const dist = V.dist(cue.pos, fc.ball.pos);
+            // 评分：优先切角厚实(更扎实冲散球堆)、距离较近且远离障碍彩球的冲击线
+            const score = (cutCos * 4.0) - (dist / 3000);
+            if (score > bestBreakupScore) {
+              bestBreakupScore = score;
+              bestBreakup = {
+                ball: fc.ball,
+                contactG: fc.contact,
+                cueDir: dir,
+                cutDot: cutCos,
+                cutAngleDeg: Math.acos(cutCos) * 180 / Math.PI,
+              };
+            }
           }
         }
       }
-      if (!bestBreakupBall) bestBreakupBall = candidateBalls[0];
 
-      const cueDir = V.norm(V.sub(bestBreakupBall.pos, cue.pos));
+      // 阶段 3.2: 终极安全保护——若全台所有角度都无法直线首碰红球（全被彩球阻挡）
+      if (!bestBreakup) {
+        // 绝不盲目对着蓝球或障碍球击打！提示玩家微调母球位置
+        showToast('⚠️ 开球通道全被彩球阻挡，请在D区内微调母球位置', 2000);
+        return false;
+      }
+
       chosenRoute = {
-        ball: bestBreakupBall,
+        ball: bestBreakup.ball,
         pocket: null,
-        contactG: bestBreakupBall.pos,
-        cueDir,
-        cutDot: 1,
-        cutAngleDeg: 0,
+        contactG: bestBreakup.contactG,
+        cueDir: bestBreakup.cueDir,
+        cutDot: bestBreakup.cutDot,
+        cutAngleDeg: bestBreakup.cutAngleDeg,
         confidence: 0,
         score: 0,
         isBreakup: true,
@@ -2107,12 +2153,12 @@
     _lastRenderKey = null;
 
     let targetDesc = '';
-    const strikePower = isBreakup ? 100 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
+    const strikePower = isBreakup ? 65 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
 
     if (isBreakup) {
       targetDesc = hasReds
-        ? `💥 红球无直接下球，100%满力冲散红球堆解围「${kindLabel(bestBall.kind)}」`
-        : `💥 彩球无直接下球，100%满力解围「${kindLabel(bestBall.kind)}」`;
+        ? `💥 红球无直接下球，65%可控力度冲散红球堆解围「${kindLabel(bestBall.kind)}」`
+        : `💥 彩球无直接下球，65%可控力度解围「${kindLabel(bestBall.kind)}」`;
     } else {
       targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}° · 力度 ${strikePower}%`;
     }
@@ -4336,56 +4382,8 @@
         return;
       }
 
-      // 1. 优先调用顶层原生 DOM 悬浮胶囊，保证 100% 常驻置顶显示、抗锯齿且不被清屏遮挡
+      // 顶层原生 DOM 悬浮胶囊：独占高清置顶渲染、无惧遮挡与清屏，彻底消除底层 Canvas 影子重影
       hudPill.show(text, accentColor);
-
-      // 2. 同时在 Canvas 2D 层绘制作为底层视觉贴合
-      if (!this.ctx || !this.canvas) return;
-      const ctx = this.ctx;
-      const canvasW = this.rect ? this.rect.width : (this.canvas.width / (this.dpr || 1));
-      const canvasH = this.rect ? this.rect.height : (this.canvas.height / (this.dpr || 1));
-      const rectLeft = this.rect ? this.rect.left : 0;
-      const rectTop = this.rect ? this.rect.top : 0;
-      const targetWin = (this.canvas.ownerDocument && this.canvas.ownerDocument.defaultView) || window;
-      const winW = targetWin.innerWidth || canvasW;
-
-      ctx.save();
-      // 100% 不透明度显示，字体字号 10px，胶囊高度 20px
-      ctx.globalAlpha = 1.0;
-      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-      const padX = 8;
-      const h = 20;
-      const textW = ctx.measureText(text).width;
-      const w = Math.ceil(textW + padX * 2 + 10);
-
-      const screenCenterX = (winW / 2) - rectLeft;
-      const x = clamp(Math.round(screenCenterX - w / 2), 6, Math.max(6, canvasW - w - 6));
-      const y = clamp(Math.round(11 - rectTop), 6, Math.max(6, canvasH - h - 6));
-
-      ctx.fillStyle = 'rgba(12, 24, 18, 0.88)';
-      ctx.beginPath();
-      if (ctx.roundRect) {
-        ctx.roundRect(x, y, w, h, h / 2);
-      } else {
-        ctx.rect(x, y, w, h);
-      }
-      ctx.fill();
-
-      // 外框颜色与圆点严格跟随 accentColor（虚线圆时为虚线圆的橙色，实线圆时为实线圆的绿色）
-      const pillColor = accentColor || CONFIG.pocketRingColor || '#00ff88';
-      ctx.strokeStyle = pillColor;
-      ctx.lineWidth = 0.9;
-      ctx.stroke();
-
-      ctx.fillStyle = pillColor;
-      ctx.beginPath();
-      ctx.arc(x + 9, y + h / 2, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#f2f7f2';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(text, x + 16, y + h / 2 + 0.5);
-      ctx.restore();
     },
 
     /* ---------- 核心瞄准线绘制（返回是否有效绘制，防止投影瞬时失败锁定空帧） ---------- */
