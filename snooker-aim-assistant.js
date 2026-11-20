@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.5.2
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、空格一键吸附对齐进球线、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.0
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(双指双击/全台自由选球/100%满力击球/死局冲球解围/连续清台)、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -1515,61 +1515,17 @@
   }
 
   let capturedCore = null;
-  let _liveRuleState = null;
-  let _liveNextTargets = null;
-  let _liveRuleResult = null;
   let _frameOrMatchOver = false;
-  let _lastPottedKind = null; // 'red' | 'color' | null
-  let _turnPhase = 'reds'; // 'reds' | 'colorChoice' | 'clearance'
-  let _lastActiveRedCount = 15;
-  let _shotStartRedCount = 15;
   const _hookedNamespaces = new WeakSet();
   const _trappedWins = new WeakSet();
 
   function onCoreRuleEvent(event) {
     if (!event) return;
     const res = event.result || event.detail?.result || event;
-    const rs = res.ruleState || res.snookerRuleState || event.ruleState;
-    const rr = res.ruleResult || event.ruleResult;
-
     if (event.type === 'frame-over' || event.type === 'game-over' || res.frameOver || res.matchOver || res.gameOver || res.isOver) {
       _frameOrMatchOver = true;
-      _liveRuleState = null;
-      _liveNextTargets = null;
-      _liveRuleResult = null;
       if (overlay && overlay.canvas) overlay.clear();
       return;
-    }
-
-    if (rs) {
-      _frameOrMatchOver = false;
-      _liveRuleState = rs;
-      if (rs.phase === 'colorChoice' || rs.phase === 'colors' || rs.phase === 'color') {
-        _turnPhase = 'colorChoice';
-      } else if (rs.phase === 'reds' || rs.phase === 'red') {
-        _turnPhase = 'reds';
-      } else if (rs.phase === 'clearance') {
-        _turnPhase = 'clearance';
-      }
-    }
-    if (rr) {
-      _liveRuleResult = rr;
-      if (Array.isArray(rr.pottedBalls) || Array.isArray(rr.potted)) {
-        const pb = rr.pottedBalls || rr.potted;
-        if (pb.some((b) => (b.kind === 'red' || b.type === 'red' || b.color === 'red' || b === 'red'))) {
-          _lastPottedKind = 'red';
-        } else if (pb.length > 0) {
-          _lastPottedKind = 'color';
-        }
-      }
-      if (Array.isArray(rr.nextTarget)) {
-        _liveNextTargets = rr.nextTarget;
-        if (_liveNextTargets.includes('red')) {
-          _turnPhase = 'reds';
-        } else if (_liveNextTargets.some((k) => k !== 'red')) {
-          _turnPhase = (_lastActiveRedCount === 0 && _lastPottedKind !== 'red') ? 'clearance' : 'colorChoice';
-        }
-      }
     }
   }
 
@@ -1584,10 +1540,6 @@
         if (api && typeof api.getState === 'function') {
           capturedCore = api;
           _frameOrMatchOver = false;
-          _lastPottedKind = null;
-          _turnPhase = 'reds';
-          _shotStartRedCount = 15;
-          _lastActiveRedCount = 15;
           NativeWorkerBridge.enableReboundInCore(api);
 
           // 劫持生命周期销毁与清理 (退出房间时立即切断残留数据并清空画布)
@@ -1596,10 +1548,6 @@
             api.destroy = function (...dArgs) {
               if (capturedCore === api) {
                 capturedCore = null;
-                _liveRuleState = null;
-                _liveNextTargets = null;
-                _liveRuleResult = null;
-                _lastPottedKind = null;
               }
               if (overlay && overlay.canvas) overlay.clear();
               return origDestroy.apply(this, dArgs);
@@ -1610,10 +1558,6 @@
             api.dispose = function (...dArgs) {
               if (capturedCore === api) {
                 capturedCore = null;
-                _liveRuleState = null;
-                _liveNextTargets = null;
-                _liveRuleResult = null;
-                _lastPottedKind = null;
               }
               if (overlay && overlay.canvas) overlay.clear();
               return origDispose.apply(this, dArgs);
@@ -1951,10 +1895,131 @@
   } catch (_) {}
 
   /* ================================================================== */
-  /* 【一键对齐】智能吸附最优进球线 (Space 空格 / 移动端按键)              */
+  /* 【每日挑战自动化击球】全台自由选球、无阻挡最优下球、死局冲球解围、100%满力出杆 */
   /* ================================================================== */
 
-  function snapToPerfectPot() {
+  function triggerFullPowerStrike(callback) {
+    // 途径 1: 底层核心控制器 API
+    const tg = getGameGlobal('threeGame');
+    const sp = getGameGlobal('SnookerProduct');
+    const practice = sp && sp.practice;
+    const controllers = [capturedCore, tg && tg.core, practice, sp && sp.core, tg].filter(Boolean);
+
+    for (const ctrl of controllers) {
+      try {
+        if (typeof ctrl.setPower === 'function') {
+          ctrl.setPower(100);
+        }
+        if (typeof ctrl.shoot === 'function') {
+          ctrl.shoot({ power: 100, tip: { x: 0, y: 0 } });
+          break;
+        }
+        if (typeof ctrl.startShot === 'function') {
+          ctrl.startShot({ power: 100, tip: { x: 0, y: 0 } });
+          break;
+        }
+        if (typeof ctrl.strike === 'function') {
+          ctrl.strike(100);
+          break;
+        }
+        if (typeof ctrl.takeShot === 'function') {
+          ctrl.takeShot(100);
+          break;
+        }
+      } catch (_) {}
+    }
+
+    // 途径 2: 模拟力度拉杆手势 (DOM / Canvas 模拟真实拉杆 100% 满力并松手释放)
+    simulatePowerSliderPullAndRelease(() => {
+      if (typeof callback === 'function') callback();
+    });
+  }
+
+  function simulatePowerSliderPullAndRelease(done) {
+    const targetDoc = overlay.getTargetDoc();
+    const win = targetDoc.defaultView || window;
+    const canvas = projection.canvas || findGameCanvasInDoc(targetDoc);
+
+    // 寻找潜在的力度条 DOM 或 Canvas 右侧滑杆区域
+    let powerEl = null;
+    const selectors = [
+      '[class*="cue-power"]', '[class*="cue_power"]', '[id*="cue-power"]',
+      '[class*="power-bar"]', '[class*="power_bar"]', '[class*="slider"]',
+      '[class*="cue-stick"]', '[id*="power"]', '[class*="power"]'
+    ];
+    for (const sel of selectors) {
+      const el = targetDoc.querySelector(sel);
+      if (el && !el.closest('#snooker-aim-panel')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 10 && rect.height > 60) {
+          powerEl = el;
+          break;
+        }
+      }
+    }
+
+    let startX = 0, startY = 0, endX = 0, endY = 0;
+    let targetNode = powerEl;
+
+    if (powerEl) {
+      const r = powerEl.getBoundingClientRect();
+      startX = r.left + r.width / 2;
+      startY = r.top + r.height * 0.15;
+      endX = startX;
+      endY = r.top + r.height * 0.95;
+    } else if (canvas) {
+      targetNode = canvas;
+      const r = canvas.getBoundingClientRect();
+      startX = r.left + r.width * 0.93;
+      startY = r.top + r.height * 0.28;
+      endX = startX;
+      endY = r.top + r.height * 0.88;
+    }
+
+    if (!targetNode) {
+      if (done) done();
+      return;
+    }
+
+    try {
+      const optsDown = {
+        bubbles: true, cancelable: true, view: win,
+        clientX: startX, clientY: startY,
+        screenX: startX, screenY: startY,
+        buttons: 1, button: 0, isPrimary: true, pointerId: 1
+      };
+      targetNode.dispatchEvent(new PointerEvent('pointerdown', optsDown));
+      targetNode.dispatchEvent(new MouseEvent('mousedown', optsDown));
+
+      setTimeout(() => {
+        const optsMove = {
+          bubbles: true, cancelable: true, view: win,
+          clientX: endX, clientY: endY,
+          screenX: endX, screenY: endY,
+          buttons: 1, button: 0, isPrimary: true, pointerId: 1
+        };
+        targetNode.dispatchEvent(new PointerEvent('pointermove', optsMove));
+        targetNode.dispatchEvent(new MouseEvent('mousemove', optsMove));
+
+        setTimeout(() => {
+          const optsUp = {
+            bubbles: true, cancelable: true, view: win,
+            clientX: endX, clientY: endY,
+            screenX: endX, screenY: endY,
+            buttons: 0, button: 0, isPrimary: true, pointerId: 1
+          };
+          targetNode.dispatchEvent(new PointerEvent('pointerup', optsUp));
+          targetNode.dispatchEvent(new MouseEvent('mouseup', optsUp));
+          if (done) done();
+        }, 80);
+      }, 50);
+    } catch (_) {
+      if (done) done();
+    }
+  }
+
+  function snapToPerfectPot(options = {}) {
+    const autoStrike = options.autoStrike !== false; // 默认自动 100% 满力击球
     const state = readState();
     if (!state) {
       showToast('未检测到球局状态', 1200);
@@ -1985,111 +2050,16 @@
     const curDir = state.aim && state.aim.direction ? V.norm(state.aim.direction) : { x: 1, y: 0 };
     const objects = activeObjectBalls(state);
     if (!objects.length) {
-      showToast('台面上无可用目标球', 1200);
+      showToast('🎉 台面上除母球外无其他球，已全部清台！', 2000);
       return false;
     }
 
-    // ================================================================
-    // 斯诺克官方击球规则推导引擎 (Snooker Rule Engine)
-    // 判定当前合法目标球候选集 (严格区分 开球/打红球阶段 与 击进红球后的打彩球阶段)
-    // ================================================================
-    const activeReds = objects.filter((b) => b.kind === 'red');
-    const activeColors = objects.filter((b) => b.kind !== 'red');
-    const COLOR_CLEAR_ORDER = ['yellow', 'green', 'brown', 'blue', 'pink', 'black'];
+    // 彻底解除斯诺克规则感知与阶段锁定：所有未进袋目标球均为完全平等的合法击打候选球！
+    const candidateBalls = objects;
 
-    // 1. 动态自适应阶段推导 (结合引擎实时事件与红球进袋自动状态机)
-    let currentPhase = 'reds';
-
-    if (activeReds.length === 0) {
-      // 台面已无红球：
-      // 若上一杆刚刚打进最后一颗红球，根据斯诺克官方规则，本杆可自由击打任意彩球 (进袋后复位)
-      // 若非刚进红球，则进入严格清彩阶段：按黄(2)->绿(3)->咖啡(4)->蓝(5)->粉(6)->黑(7)顺序击打
-      if (_lastPottedKind === 'red') {
-        currentPhase = 'colorChoice'; // 自由选择击打任意彩球
-      } else {
-        currentPhase = 'clearance'; // 严格按顺序清彩
-      }
-    } else {
-      // 台面上仍有红球 (开球15红球、10红球围球、6红球等)
-      // 默认必须击打红球，彩球绝对排除
-      if (_lastPottedKind === 'red') {
-        currentPhase = 'colorChoice';
-      } else if (_liveNextTargets && Array.isArray(_liveNextTargets)) {
-        if (_liveNextTargets.includes('red')) currentPhase = 'reds';
-        else if (_liveNextTargets.some((k) => k !== 'red')) currentPhase = 'colorChoice';
-      } else if (_liveRuleState && _liveRuleState.phase) {
-        if (_liveRuleState.phase === 'colorChoice' || _liveRuleState.phase === 'colors' || _liveRuleState.phase === 'color') currentPhase = 'colorChoice';
-        else if (_liveRuleState.phase === 'reds' || _liveRuleState.phase === 'red') currentPhase = 'reds';
-        else if (_liveRuleState.phase === 'clearance') currentPhase = 'clearance';
-      } else {
-        currentPhase = 'reds';
-      }
-
-      // 【核心意图防护】：若台面有红球，且玩家当前瞄准方向明显朝向红球（或射线相交/垂直距离<=40mm），
-      // 100% 尊重玩家击打红球的意图锁定红球，绝不误吸附到粉球/蓝球/绿球！
-      if (currentPhase === 'colorChoice') {
-        const aimsAtRed = activeReds.some((b) => {
-          const rc = rayContact(cue.pos, curDir, b);
-          if (rc) return true;
-          const v = V.sub(b.pos, cue.pos);
-          const proj = V.dot(v, curDir);
-          if (proj <= 0) return false;
-          const perp = Math.sqrt(Math.max(0, V.lenSq(v) - proj * proj));
-          return perp <= 40;
-        });
-        if (aimsAtRed) {
-          currentPhase = 'reds';
-        }
-      }
-    }
-
-    _turnPhase = currentPhase;
-    _lastActiveRedCount = activeReds.length;
-
-    let candidateBalls = [];
-
-    if (currentPhase === 'clearance') {
-      // 【清彩球阶段】必须按黄(2)->绿(3)->咖啡(4)->蓝(5)->粉(6)->黑(7)顺序击打
-      const nextColor = COLOR_CLEAR_ORDER.find((col) => objects.some((b) => b.kind === col));
-      candidateBalls = nextColor ? objects.filter((b) => b.kind === nextColor) : activeColors;
-    } else if (currentPhase === 'colorChoice') {
-      // 【打彩球阶段】（打进红球后，或打进最后一颗红球后自由选打任意彩球）
-      // 1. 检查玩家是否已有意朝向某颗彩球（35度角内寻找彩球）
-      let aimedColor = null;
-      let minAngleDist = Infinity;
-      for (const b of activeColors) {
-        const v = V.sub(b.pos, cue.pos);
-        const dist = V.len(v);
-        if (dist < 1e-3) continue;
-        const dir = V.norm(v);
-        const cosAngle = V.dot(curDir, dir);
-        if (cosAngle > 0.819) { // 35度锥角内
-          if (dist < minAngleDist) {
-            minAngleDist = dist;
-            aimedColor = b;
-          }
-        }
-      }
-      if (aimedColor) {
-        candidateBalls = [aimedColor];
-      } else {
-        // 若玩家尚未朝向某颗彩球，候选集为全部可打彩球（自动寻找角度最正、最易进袋的那颗彩球！）
-        candidateBalls = activeColors;
-      }
-    } else {
-      // 【打红球阶段】（开球首杆、10红球围球、常规红球：彩球绝对排除！粉球/蓝球/绿球绝不误吸！）
-      candidateBalls = activeReds;
-    }
-
-    if (!candidateBalls.length) candidateBalls = objects;
-
-    // 2. 识别用户当前瞄准意图的目标球 (精准物理相交 > 准星中心垂直距离 perp)
-    // 彻底解决“用户已瞄准一个球，一键对齐却选择旁边球”的缺陷：
-    // 严禁按到母球的投影距离 proj 排序，必须优先按准星中心垂直距离 perp 紧致匹配！
+    // 1. 识别用户当前瞄准意图的目标球 (物理相交优先 > 准星中心垂直距离 perp)
     let userAimedBall = null;
     let minRayTHit = Infinity;
-
-    // 策略 A: 优先检查当前瞄准射线是否物理相交命中某颗候选球 (严格按物理接触先后顺序)
     for (const b of candidateBalls) {
       const rc = rayContact(cue.pos, curDir, b);
       if (rc && rc.tHit < minRayTHit) {
@@ -2097,9 +2067,6 @@
         userAimedBall = b;
       }
     }
-
-    // 策略 B: 若准星有轻微微调偏差未直接接触，以离瞄准中心线垂直距离(perp)最近的球为准
-    // 容差收紧至 40mm (约 1.5 倍球半径)，绝不大范围误抓相隔较远的邻球
     if (!userAimedBall) {
       let minPerpDist = Infinity;
       for (const b of candidateBalls) {
@@ -2107,47 +2074,35 @@
         const proj = V.dot(v, curDir);
         if (proj <= 0) continue;
         const perp = Math.sqrt(Math.max(0, V.lenSq(v) - proj * proj));
-        if (perp <= 40) {
-          if (perp < minPerpDist) {
-            minPerpDist = perp;
-            userAimedBall = b;
-          }
+        if (perp <= 45 && perp < minPerpDist) {
+          minPerpDist = perp;
+          userAimedBall = b;
         }
       }
     }
 
-    // 3. 【核心下球路线验证函数】：验证某球进某袋是否为“合法无阻挡下球路线”
-    // 严格满足四大物理法则：
-    // (1) evaluatePocket 判定有效且置信度大于0 (达到虚线圆或实线圆进球标记标准)
-    // (2) 切角硬性限制：cutAngleDeg <= 75° (cutDot >= 0.2588)，排除大角度贴库球与死角薄球
-    // (3) 【母球通路阻挡检测】：母球 -> 假想球 (cue -> contactG) 通路绝无任何球阻挡！(开球时彻底过滤粉球/蓝球遮挡)
-    // (4) 【目标球进袋阻挡检测】：目标球 -> 袋口 (ball -> pocket.opening) 通路绝无任何球阻挡！
+    // 2. 核心下球路线验证函数 (四大物理法则：进袋判定 + 切角限制 <= 75° + 双重无阻挡通道)
     const pockets = readPockets(state);
     function evaluateValidRoute(ball, pk) {
       const dirToPk = V.norm(V.sub(pk.opening, ball.pos));
       const towardPk = V.dot(dirToPk, pk.normal);
       if (towardPk <= 0.05) return null;
 
-      // 必须满足袋口有效宽度与入射角标准 (能产生虚线圆或实线圆进球标记)
       const ev = evaluatePocket(ball.pos, dirToPk, pk);
       if (!ev || ev.confidence <= 0) return null;
 
-      // 假想球接触点
       const contactG = V.sub(ball.pos, V.scale(dirToPk, COLLISION_DIST_MM));
       const cueDir = V.norm(V.sub(contactG, cue.pos));
       const cutDot = V.dot(cueDir, dirToPk);
-      // 切角硬性上限：cos(75°) ≈ 0.2588，大于 75度的大角度贴库球在物理上绝不可能下球
-      if (cutDot < 0.2588) return null;
+      if (cutDot < 0.2588) return null; // 切角 > 75度物理不可能下球
       const cutAngleDeg = Math.acos(clamp(cutDot, -1, 1)) * 180 / Math.PI;
 
-      // 【双重物理障碍检测】：
-      // (a) 母球 -> 假想球 通路绝不能有障碍球！(开球时粉球、蓝球、阻挡红球直接过滤)
+      // 双重物理障碍检测：
+      // (a) 母球 -> 假想球 无阻挡
       if (pathBlocked(cue.pos, contactG, objects, ball.id, cue.id)) return null;
-
-      // (b) 目标球 -> 袋口 通路绝不能有障碍球！
+      // (b) 目标球 -> 袋口 无阻挡
       if (pathBlocked(ball.pos, pk.opening, objects, ball.id, cue.id)) return null;
 
-      // 综合评分：置信度(虚线/实线圆品质) + 切角正向度 - 进袋距离折减
       const distObjToPk = V.dist(ball.pos, pk.opening);
       const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000);
 
@@ -2160,13 +2115,14 @@
         cutAngleDeg,
         confidence: ev.confidence,
         score,
+        isBreakup: false,
       };
     }
 
-    // 4. 下球路线分级搜索与匹配
+    // 3. 路线分级搜索
     let chosenRoute = null;
 
-    // 优先级 1: 用户已有明确意向的目标球，在该球的所有袋口中寻找最佳合法路线
+    // 优先级 1: 用户已有明确意向的目标球，在该球的 6 个袋口中寻找最佳无阻挡下球路线
     if (userAimedBall) {
       let bestAimedScore = -Infinity;
       for (const pk of pockets) {
@@ -2178,31 +2134,7 @@
       }
     }
 
-    // 优先级 2: 若玩家瞄准的球被挡或无合法下球袋口，在准星近距离小锥角(25度)内寻找其他候选球
-    if (!chosenRoute) {
-      let bestNearbyScore = -Infinity;
-      for (const b of candidateBalls) {
-        if (userAimedBall && b.id === userAimedBall.id) continue;
-        const v = V.sub(b.pos, cue.pos);
-        const dist = V.len(v);
-        if (dist < 1e-3) continue;
-        const cosAngle = V.dot(curDir, V.norm(v));
-        if (cosAngle > 0.906) { // 25度锥角内
-          for (const pk of pockets) {
-            const route = evaluateValidRoute(b, pk);
-            if (route) {
-              const nearbyScore = route.score + (cosAngle * 1.5);
-              if (nearbyScore > bestNearbyScore) {
-                bestNearbyScore = nearbyScore;
-                chosenRoute = route;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 优先级 3: 全局搜索合法候选球的下球路线
+    // 优先级 2: 若用户瞄准的球被挡或无袋口，全局遍历全台所有目标球的所有袋口
     if (!chosenRoute) {
       let bestGlobalScore = -Infinity;
       for (const b of candidateBalls) {
@@ -2216,49 +2148,60 @@
       }
     }
 
-    // 【关键指令处理】：如果所有目标球或袋口都没有下球路线，直接报错！绝不乱瞄，更不回退到被遮挡的错误路线！
+    // 优先级 3: 【死局解围策略】：若全台没有任何可下球路线，直接以 100% 满力击打任意无阻挡球打散球堆
     if (!chosenRoute) {
-      showToast('⚠️ 当前无合法进球路线 (障碍球阻挡或无下球)', 2500);
-      return false;
+      let bestBreakupBall = null;
+      let minBreakupDist = Infinity;
+      for (const b of candidateBalls) {
+        if (!pathBlocked(cue.pos, b.pos, objects, b.id, cue.id)) {
+          const dist = V.dist(cue.pos, b.pos);
+          if (dist < minBreakupDist) {
+            minBreakupDist = dist;
+            bestBreakupBall = b;
+          }
+        }
+      }
+      if (!bestBreakupBall) bestBreakupBall = candidateBalls[0];
+
+      const cueDir = V.norm(V.sub(bestBreakupBall.pos, cue.pos));
+      chosenRoute = {
+        ball: bestBreakupBall,
+        pocket: null,
+        contactG: bestBreakupBall.pos,
+        cueDir,
+        cutDot: 1,
+        cutAngleDeg: 0,
+        confidence: 0,
+        score: 0,
+        isBreakup: true,
+      };
     }
 
-    const { ball: bestBall, pocket: targetPocket, cueDir: perfectAimDir, cutAngleDeg } = chosenRoute;
-
-    let phaseTag = '';
-    if (currentPhase === 'colorChoice') phaseTag = ' (彩球)';
-    else if (currentPhase === 'clearance') phaseTag = ' (清彩)';
-
-    const targetDesc = `「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}°${phaseTag}`;
+    const { ball: bestBall, pocket: targetPocket, cueDir: perfectAimDir, cutAngleDeg, isBreakup } = chosenRoute;
     const nextAngle = Math.atan2(perfectAimDir.y, perfectAimDir.x);
 
-    // 3. 执行瞄准对齐控制 (调用游戏核心底层 API: setDirection / aimAt)
+    // 4. 执行瞄准对齐控制 (写入游戏控制器)
     const tg = getGameGlobal('threeGame');
     const sp = getGameGlobal('SnookerProduct');
     const practice = sp && sp.practice;
     const controllers = [capturedCore, tg && tg.core, practice, sp && sp.core, tg].filter(Boolean);
 
-    let applied = false;
     for (const ctrl of controllers) {
       try {
         if (typeof ctrl.setDirection === 'function') {
           ctrl.setDirection(perfectAimDir);
-          applied = true;
           break;
         }
         if (typeof ctrl.aimAt === 'function') {
-          const targetPoint = chosenRoute.contactG || bestBall.pos;
-          ctrl.aimAt(targetPoint);
-          applied = true;
+          ctrl.aimAt(chosenRoute.contactG || bestBall.pos);
           break;
         }
         if (typeof ctrl.setAimDirection === 'function') {
           ctrl.setAimDirection(perfectAimDir);
-          applied = true;
           break;
         }
         if (typeof ctrl.setAimAngle === 'function') {
           ctrl.setAimAngle(nextAngle);
-          applied = true;
           break;
         }
       } catch (_) {}
@@ -2275,17 +2218,169 @@
 
     _lastGeomKey = null;
     _lastRenderKey = null;
-    applied = true;
 
-    showToast(`🎯 已一键对准: ${targetDesc}`, 1500);
+    let targetDesc = '';
+    if (isBreakup) {
+      targetDesc = `💥 无直接下球，100%满力冲球解围「${kindLabel(bestBall.kind)}」`;
+    } else {
+      targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}°`;
+    }
+
+    if (autoStrike) {
+      showToast(`${targetDesc} · 100%满力出杆!`, 1500);
+      setTimeout(() => {
+        triggerFullPowerStrike();
+      }, 60);
+    } else {
+      showToast(`🎯 已对准: ${targetDesc}`, 1500);
+    }
+
     return true;
   }
+
+  // 连续清台自动化状态机
+  const DailyChallengeEngine = {
+    running: false,
+    timer: null,
+    step: 'idle', // 'idle' | 'aiming' | 'waitingMotion' | 'moving' | 'settling'
+    lastShotTime: 0,
+
+    toggle() {
+      if (this.running) {
+        this.stop('已暂停每日挑战自动化击球');
+      } else {
+        this.start();
+      }
+    },
+
+    start() {
+      const raw = extractRawState();
+      if (raw) {
+        const objects = activeObjectBalls(raw);
+        if (!objects.length) {
+          showToast('🎉 台面上除母球外无其他球，已全部清台！', 2000);
+          return;
+        }
+      }
+      const state = readState();
+      if (!state) {
+        showToast('未检测到球局状态', 1200);
+        return;
+      }
+      if (isSettlementOrGameOverScreen(state)) {
+        showToast('当前对局已结束', 1200);
+        return;
+      }
+      if (isLoadingScreen(state)) {
+        showToast('对局加载中，请稍候', 1200);
+        return;
+      }
+      if (isLobbyOrNonTableScreen(state)) {
+        showToast('当前处于大厅，未进入对局', 1200);
+        return;
+      }
+      const objects = activeObjectBalls(state);
+      if (!objects.length) {
+        showToast('🎉 台面上除母球外无其他球，已全部清台！', 2000);
+        return;
+      }
+
+      this.running = true;
+      this.step = 'idle';
+      showToast('🚀 每日挑战自动化击球已启动', 1500);
+      this.scheduleNextShot(50);
+    },
+
+    stop(reason) {
+      this.running = false;
+      this.step = 'idle';
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+      }
+      if (reason) {
+        showToast(reason, 1500);
+      }
+    },
+
+    scheduleNextShot(delayMs = 400) {
+      if (!this.running) return;
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        if (!this.running) return;
+        this.executeShot();
+      }, delayMs);
+    },
+
+    executeShot() {
+      if (!this.running) return;
+      const state = readState();
+      if (!state || isSettlementOrGameOverScreen(state) || isLobbyOrNonTableScreen(state)) {
+        this.stop('对局结束或离开球桌，自动化停止');
+        return;
+      }
+      if (isShotOrMoving(state)) {
+        this.step = 'moving';
+        return;
+      }
+
+      const objects = activeObjectBalls(state);
+      if (!objects.length) {
+        this.stop('🎉 每日挑战已完成，已全部清台！');
+        try { if (navigator.vibrate) navigator.vibrate([100, 100, 200]); } catch (_) {}
+        return;
+      }
+
+      this.step = 'aiming';
+      const result = snapToPerfectPot({ autoStrike: true });
+      if (!result) {
+        this.scheduleNextShot(1000);
+        return;
+      }
+
+      this.lastShotTime = performance.now();
+      this.step = 'waitingMotion';
+    },
+
+    onFrame(state, shot, still) {
+      if (!this.running) return;
+      if (isSettlementOrGameOverScreen(state) || isLobbyOrNonTableScreen(state)) {
+        this.stop('对局已结束，自动化停止');
+        return;
+      }
+
+      const now = performance.now();
+      if (this.step === 'waitingMotion') {
+        if (shot || (now - this.lastShotTime > 1200)) {
+          this.step = 'moving';
+        }
+        return;
+      }
+
+      if (this.step === 'moving') {
+        if (!shot && still && (now - this.lastShotTime > 1500)) {
+          this.step = 'settling';
+          const remaining = activeObjectBalls(state);
+          if (remaining.length === 0) {
+            this.stop('🎉 每日挑战已完成，已全部清台！');
+            try { if (navigator.vibrate) navigator.vibrate([100, 100, 200]); } catch (_) {}
+            return;
+          }
+          this.scheduleNextShot(450);
+        }
+      }
+    }
+  };
 
   const _boundTapDocs = new WeakSet();
   let _lastScreenTapTime = 0;
   let _lastScreenTapPos = { x: 0, y: 0 };
   let _screenTapCount = 0;
   let _pendingDoubleTapTimer = null;
+  let _lastTwoFingerTapTime = 0;
+  let _lastTwoFingerTapPos = { x: 0, y: 0 };
+  let _twoFingerTapCount = 0;
 
   function togglePanelCircleVisibility() {
     let handled = false;
@@ -2322,12 +2417,10 @@
 
       const now = performance.now();
       const dt = now - _lastScreenTapTime;
-      // 过滤触摸屏上 pointerdown 和 touchstart 产生的纳秒级重复事件 (<40ms)
       if (dt < 40 && _lastScreenTapTime > 0) return;
 
       const dist = Math.hypot(clientX - _lastScreenTapPos.x, clientY - _lastScreenTapPos.y);
 
-      // 位移过大(超过 30px)判定为滑屏调杆，重置点击计数并取消待定双击
       if (dist >= 30) {
         if (_pendingDoubleTapTimer) {
           clearTimeout(_pendingDoubleTapTimer);
@@ -2339,7 +2432,6 @@
         return;
       }
 
-      // 时间窗口：在 40ms ~ 330ms 之间且位移不超过 30px，累加点击次数；否则重置为第1击
       if (dt >= 40 && dt <= 330) {
         _screenTapCount++;
       } else {
@@ -2355,7 +2447,7 @@
           _pendingDoubleTapTimer = null;
         }
       } else if (_screenTapCount === 2) {
-        // 第二击：进入双击等待窗口 (220ms)。若后续 220ms 内未产生第三击，则判定为有效双击
+        // 双击等待窗口 (220ms)
         if (_pendingDoubleTapTimer) {
           clearTimeout(_pendingDoubleTapTimer);
           _pendingDoubleTapTimer = null;
@@ -2364,9 +2456,8 @@
           _pendingDoubleTapTimer = null;
           _screenTapCount = 0;
           if (CONFIG.doubleClickAlign) {
-            if (snapToPerfectPot()) {
-              try { if (navigator.vibrate) navigator.vibrate(25); } catch (_) {}
-            }
+            DailyChallengeEngine.toggle();
+            try { if (navigator.vibrate) navigator.vibrate(25); } catch (_) {}
           }
         }, 220);
       } else if (_screenTapCount >= 3) {
@@ -2376,23 +2467,62 @@
           _pendingDoubleTapTimer = null;
         }
         _screenTapCount = 0;
-        _lastScreenTapTime = 0; // 清除时间戳，防止第四次快速连击被串联
+        _lastScreenTapTime = 0;
         togglePanelCircleVisibility();
         try { if (navigator.vibrate) navigator.vibrate([30, 40, 30]); } catch (_) {}
       }
     };
 
-    // 1. 监听 pointerdown (覆盖鼠标、触控笔与现代触摸屏)
-    doc.addEventListener('pointerdown', (e) => {
-      if (e.button != null && e.button !== 0) return;
-      handleTap(e.clientX, e.clientY, e.target);
+    // 1. 监听 touchstart：多点触控与双指双击判定
+    doc.addEventListener('touchstart', (e) => {
+      if (!e.touches) return;
+
+      // 【核心特性】双指双击屏幕触发每日挑战自动化击球 (启动/暂停)
+      if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        if ((t1.target && t1.target.closest && t1.target.closest('#snooker-aim-panel')) ||
+            (t2.target && t2.target.closest && t2.target.closest('#snooker-aim-panel'))) {
+          return;
+        }
+
+        const now = performance.now();
+        const cx = (t1.clientX + t2.clientX) / 2;
+        const cy = (t1.clientY + t2.clientY) / 2;
+        const dt = now - _lastTwoFingerTapTime;
+        const dist = Math.hypot(cx - _lastTwoFingerTapPos.x, cy - _lastTwoFingerTapPos.y);
+
+        if (dt >= 40 && dt <= 380 && dist < 50) {
+          _twoFingerTapCount++;
+        } else {
+          _twoFingerTapCount = 1;
+        }
+
+        _lastTwoFingerTapTime = now;
+        _lastTwoFingerTapPos = { x: cx, y: cy };
+
+        if (_twoFingerTapCount >= 2) {
+          _twoFingerTapCount = 0;
+          _lastTwoFingerTapTime = 0;
+          if (CONFIG.doubleClickAlign) {
+            DailyChallengeEngine.toggle();
+            try { if (navigator.vibrate) navigator.vibrate([30, 50, 30]); } catch (_) {}
+          }
+        }
+        return;
+      }
+
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        handleTap(touch.clientX, touch.clientY, e.target);
+      }
     }, { passive: true, capture: true });
 
-    // 2. 兼顾 touchstart (兜底某些老旧或特殊嵌套环境)
-    doc.addEventListener('touchstart', (e) => {
-      if (!e.touches || e.touches.length !== 1) return;
-      const touch = e.touches[0];
-      handleTap(touch.clientX, touch.clientY, e.target);
+    // 2. 监听 pointerdown (覆盖鼠标单指/笔触)
+    doc.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
+      if (e.pointerType === 'touch') return; // 移动端 touch 已在 touchstart 处理
+      handleTap(e.clientX, e.clientY, e.target);
     }, { passive: true, capture: true });
   }
 
@@ -2410,13 +2540,22 @@
       const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
 
-      // 【快捷键】Space 空格键一键对准进球线
+      // 【快捷键】Space 空格键触发每日挑战自动化击球 (启动/暂停)
       if (e.code === 'Space' || e.key === ' ') {
-        if (snapToPerfectPot()) {
+        DailyChallengeEngine.toggle();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // 【快捷键】Escape 键退出/停止自动化击球
+      if (e.code === 'Escape' || e.key === 'Escape') {
+        if (DailyChallengeEngine.running) {
+          DailyChallengeEngine.stop('已按下ESC停止每日挑战自动化击球');
           e.preventDefault();
           e.stopPropagation();
+          return;
         }
-        return;
       }
     }, true);
   }
@@ -4855,12 +4994,12 @@
       methodRow.append(methodLabel, segBox);
       this.body.appendChild(methodRow);
 
-      row('双击屏幕一键对齐', 'doubleClickAlign');
+      row('双指双击每日挑战自动击球', 'doubleClickAlign');
       row('信息浮标', 'showHudPill');
       row('调试信息', 'showDebug');
 
       const tipHint = document.createElement('div');
-      tipHint.textContent = '💡 提示: 三击屏幕可隐藏/重新显示加号圆圈';
+      tipHint.textContent = '💡 提示: 双指双击屏幕触发每日挑战自动击球 (空格键启动/暂停，三击隐藏面板)';
       tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
       this.body.appendChild(tipHint);
 
@@ -5416,6 +5555,9 @@
         _wasInShot = false;
         _shotHiddenSince = 0;
         resetTurnPowerState();
+        if (DailyChallengeEngine.running) {
+          DailyChallengeEngine.stop('离开球桌或对局结束，已退出自动化击球');
+        }
 
         let waitReason = '辅助脚本已就绪 · 待进入球桌';
         if (isSettlement) {
@@ -5481,31 +5623,11 @@
           if (SnookerSpy.enabled && SnookerSpy.activeShotRecord) {
             SnookerSpy.handleCoreEvent({ type: 'shot-settled' });
           }
-
-          // === 击球落袋结算与斯诺克阶段推进 ===
-          const settledReds = (state.balls || []).filter((b) => b && !b.potted && b.kind === 'red').length;
-          if (settledReds < _shotStartRedCount) {
-            // 本杆成功击进红球！
-            _lastPottedKind = 'red';
-            _turnPhase = 'colorChoice'; // 下一杆打彩球 (若剩0红球则是任意自由彩球)
-          } else {
-            // 本杆未进红球 (击打彩球、未进球或换杆)
-            _lastPottedKind = 'color';
-            _turnPhase = settledReds > 0 ? 'reds' : 'clearance';
-          }
-          _lastActiveRedCount = settledReds;
-          _shotStartRedCount = settledReds;
-        } else {
-          // 击球前瞄准静止状态：维护红球数量基准，若重摆球台(红球数量增加)则重置
-          const curReds = (state.balls || []).filter((b) => b && !b.potted && b.kind === 'red').length;
-          if (curReds > _shotStartRedCount) {
-            _lastPottedKind = null;
-            _turnPhase = 'reds';
-          }
-          _shotStartRedCount = curReds;
         }
         _shotHiddenSince = 0;
       }
+
+      DailyChallengeEngine.onFrame(state, shot, ballsActuallyStill(state));
 
       const keys = buildStateKeys(state);
       if (!keys) {
@@ -5608,7 +5730,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.5.2',
+      version: '1.6.0',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
@@ -5635,6 +5757,8 @@
       resolvePhysicsCushionRebound,
       applyCutInducedThrow,
       snapToPerfectPot,
+      triggerFullPowerStrike,
+      DailyChallengeEngine,
       togglePanelCircleVisibility,
       ui,
       engineSim,
