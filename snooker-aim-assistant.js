@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.6
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、智能开球与死局冲球解围算法(严格首碰合法性校验/绕过蓝球外侧通视通道/杜绝误击蓝球犯规/65%可控稳健冲球)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.7
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、贴库球与半贴库球专项自适应瞄准补偿(精准检测净空≤4mm全贴库与≤25mm半贴库/平行库壁导向切线自适应平移入袋点/杜绝撞击外角嘴晃袋/22%~32%贴库轻推安全力度压制/HUD浮标联动显示贴库与净空)、智能开球与死局冲球解围算法(严格首碰合法性校验/绕过蓝球外侧通视通道/杜绝误击蓝球犯规/65%可控稳健冲球)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.6';
+  const SCRIPT_VERSION = '1.6.7';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1937,14 +1937,19 @@
       userAimedBall = null;
     }
 
-    // 2. 核心下球路线验证函数 (四大物理法则：进袋判定 + 切角限制 <= 75° + 双重无阻挡通道)
+    // 2. 核心下球路线验证函数 (四大物理法则：贴库自适应补偿 + 进袋判定 + 切角限制 <= 75° + 双重无阻挡通道)
     const pockets = readPockets(state);
+    const tableBounds = readTableBounds(state);
     function evaluateValidRoute(ball, pk) {
-      const dirToPk = V.norm(V.sub(pk.opening, ball.pos));
+      // 贴库球专项自适应平移补偿：沿库滑向角袋时，将入袋目标点吸附到平行库壁切线上，杜绝撞击外角嘴晃袋
+      const compResult = resolveCompensatedPocketTarget(ball.pos, pk, tableBounds);
+      const effectiveTarget = compResult.targetPoint;
+
+      const dirToPk = V.norm(V.sub(effectiveTarget, ball.pos));
       const towardPk = V.dot(dirToPk, pk.normal);
       if (towardPk <= 0.05) return null;
 
-      const ev = evaluatePocket(ball.pos, dirToPk, pk);
+      const ev = evaluatePocket(ball.pos, dirToPk, pk, effectiveTarget);
       if (!ev || ev.confidence <= 0) return null;
 
       const contactG = V.sub(ball.pos, V.scale(dirToPk, COLLISION_DIST_MM));
@@ -1956,29 +1961,39 @@
       // 双重物理障碍检测：
       // (a) 母球 -> 假想球 无阻挡
       if (pathBlocked(cue.pos, contactG, objects, ball.id, cue.id)) return null;
-      // (b) 目标球 -> 袋口 无阻挡
-      if (pathBlocked(ball.pos, pk.opening, objects, ball.id, cue.id)) return null;
+      // (b) 目标球 -> 袋口 (采用有效入袋点) 无阻挡
+      if (pathBlocked(ball.pos, effectiveTarget, objects, ball.id, cue.id)) return null;
 
-      const distObjToPk = V.dist(ball.pos, pk.opening);
+      const distObjToPk = V.dist(ball.pos, effectiveTarget);
       // 物理极限可达性检查（能量守恒）：即使 100% 满力目标球最大位移也达不到袋口，直接淘汰
       const maxReachAt100 = reachCapFallback(100, cutDot);
       if (maxReachAt100 != null && distObjToPk > maxReachAt100) return null;
 
       // 计算该路线推荐出杆力度（基于 3.4.2 实测动力学模型与能量衰减）
-      const recommendedPower = calculateRecommendedPower(
+      let recommendedPower = calculateRecommendedPower(
         cue.pos,
         contactG,
         ball.pos,
-        pk.enterPoint || pk.opening,
+        effectiveTarget,
         cueDir,
         { x: 0, y: 0 },
         2.5
       );
+
+      // 贴库球专项安全力度压制（落实台球铁律：贴库轻推，力大必晃）
+      if (compResult.cushionHug.isTight) {
+        recommendedPower = clamp(recommendedPower, 22, 32);
+      } else if (compResult.cushionHug.isNear) {
+        recommendedPower = clamp(recommendedPower, 22, 38);
+      }
+
       if (recommendedPower > 100) return null; // 无法以安全力度打进，排除
 
       // 力度合理性惩罚：对需要 75% 以上大力量的高难度球适度扣分，优先选择更稳健的中小力量线路
       const powerPenalty = recommendedPower > 75 ? (recommendedPower - 75) * 0.025 : 0;
-      const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000) - powerPenalty;
+      // 贴库自适应补偿稳健路线给予适度加权激励
+      const hugBonus = compResult.isCompensated ? 0.35 : 0;
+      const score = (ev.confidence * 4.0) + (cutDot * 3.5) - (distObjToPk / 4000) - powerPenalty + hugBonus;
 
       return {
         ball,
@@ -1991,6 +2006,9 @@
         recommendedPower,
         score,
         isBreakup: false,
+        cushionHug: compResult.cushionHug,
+        isCompensated: compResult.isCompensated,
+        effectiveTarget,
       };
     }
 
@@ -2153,18 +2171,30 @@
     _lastRenderKey = null;
 
     let targetDesc = '';
-    const strikePower = isBreakup ? 65 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
+    let strikePower = isBreakup ? 65 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
+    // 终极安全校验：对贴库球出杆力度严格压制
+    if (chosenRoute.cushionHug?.isTight) {
+      strikePower = clamp(strikePower, 22, 32);
+    } else if (chosenRoute.cushionHug?.isNear) {
+      strikePower = clamp(strikePower, 22, 38);
+    }
 
     if (isBreakup) {
       targetDesc = hasReds
         ? `💥 红球无直接下球，65%可控力度冲散红球堆解围「${kindLabel(bestBall.kind)}」`
         : `💥 彩球无直接下球，65%可控力度解围「${kindLabel(bestBall.kind)}」`;
     } else {
-      targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}° · 力度 ${strikePower}%`;
+      let hugTag = '';
+      if (chosenRoute.cushionHug?.isTight) {
+        hugTag = ` · 📌贴库(${chosenRoute.cushionHug.edgeGap}mm)修正`;
+      } else if (chosenRoute.cushionHug?.isNear) {
+        hugTag = ` · 📐半贴库(${chosenRoute.cushionHug.edgeGap}mm)修正`;
+      }
+      targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}° · 力度 ${strikePower}%${hugTag}`;
     }
 
     if (autoStrike) {
-      const pwrLabel = isBreakup ? '100%满力出杆!' : `力度 ${strikePower}% 出杆!`;
+      const pwrLabel = isBreakup ? '65%稳健冲球出杆!' : `力度 ${strikePower}% 出杆!`;
       showToast(`${targetDesc} · ${pwrLabel}`, 1500);
       setTimeout(() => {
         triggerStrike(null, strikePower);
@@ -2741,22 +2771,138 @@
   }
 
   /* ================================================================== */
+  /* 贴库球与半贴库球专项自适应补偿算法                                   */
+  /* ================================================================== */
+
+  /**
+   * 检测目标球是否处于贴库（净空 <= 4mm）或半贴库（净空 <= 25mm）状态
+   * @param {Object} ballPos 目标球二维坐标 {x, y}
+   * @param {Object} [tableBounds] 台面有效边界（包含 boundX, boundY）
+   * @returns {Object} 贴库检测结果
+   */
+  function checkCushionHug(ballPos, tableBounds) {
+    if (!ballPos || !Number.isFinite(ballPos.x) || !Number.isFinite(ballPos.y)) {
+      return { isHug: false, isTight: false, isNear: false, edgeGap: Infinity, axis: null, railSign: 0, boundVal: 0 };
+    }
+    const bX = (tableBounds && Number.isFinite(tableBounds.boundX)) ? tableBounds.boundX : (CONFIG.railBoundX || 1758.1);
+    const bY = (tableBounds && Number.isFinite(tableBounds.boundY)) ? tableBounds.boundY : (CONFIG.railBoundY || 862.75);
+
+    const gapX = Math.max(0, bX - Math.abs(ballPos.x));
+    const gapY = Math.max(0, bY - Math.abs(ballPos.y));
+
+    // 判断更贴近哪面库边（X为顶底短边库，Y为左右长边库）
+    const isLongRail = gapY <= gapX;
+    const axis = isLongRail ? 'y' : 'x';
+    const edgeGap = isLongRail ? gapY : gapX;
+    const railSign = isLongRail ? Math.sign(ballPos.y || 1) : Math.sign(ballPos.x || 1);
+    const boundVal = isLongRail ? bY : bX;
+
+    const isTight = edgeGap <= 4.0;
+    const isNear = edgeGap > 4.0 && edgeGap <= 25.0;
+    const isHug = isTight || isNear;
+
+    return {
+      isHug,
+      isTight,
+      isNear,
+      axis,        // 'y' (左右长边库) | 'x' (顶底短边库)
+      edgeGap: Math.round(edgeGap * 10) / 10,
+      railSign,    // 1 或 -1
+      boundVal,
+    };
+  }
+
+  /**
+   * 解析入袋目标点：对同侧角袋的贴库/半贴库球执行自适应平移补偿，
+   * 使目标球轨迹平行于库边切入袋门，杜绝切向偏内撞击外角嘴（Jaw）剧烈晃袋
+   * @param {Object} ballPos 目标球位置
+   * @param {Object} pk 袋口对象（含 id, type, opening, normal 等）
+   * @param {Object} [tableBounds] 台面有效边界
+   * @returns {Object} { targetPoint, cushionHug, isCompensated }
+   */
+  function resolveCompensatedPocketTarget(ballPos, pk, tableBounds) {
+    const ch = checkCushionHug(ballPos, tableBounds);
+    const rawTarget = (pk && (pk.opening || pk.center)) ? { x: (pk.opening || pk.center).x, y: (pk.opening || pk.center).y } : { x: 0, y: 0 };
+    if (!ch.isHug || !pk) {
+      return { targetPoint: rawTarget, cushionHug: ch, isCompensated: false };
+    }
+
+    // 只有进角袋且目标球沿同侧库边走向袋口时，才需要平行贴库补偿；中袋为横向射入，不适用长库滑行
+    const isCorner = pk.type === 'corner' || (pk.id && pk.id.includes('corner'));
+    if (!isCorner) {
+      return { targetPoint: rawTarget, cushionHug: ch, isCompensated: false };
+    }
+
+    let isSameSide = false;
+    let compensated = { x: rawTarget.x, y: rawTarget.y };
+
+    if (ch.axis === 'y') {
+      // 长边库：目标球与袋口在同侧（同一 Y 符号）
+      isSameSide = Math.sign(rawTarget.y) === ch.railSign;
+      // 目标球必须处于朝向该角袋滑行的来向区域（X 坐标在角袋内侧，且与角袋中心保持有效距离）
+      const dx = rawTarget.x - ballPos.x;
+      const isMovingTowardCorner = (Math.sign(dx) === Math.sign(rawTarget.x)) && Math.abs(dx) > 10;
+
+      if (isSameSide && isMovingTowardCorner) {
+        // 全贴库(<=4mm): 目标点 Y 坐标严格锁定为目标球的 Y 坐标，形成完全平行于长库的笔直线！
+        // 半贴库(4~25mm): 依据接近程度在线性权重过渡到目标球 Y 坐标，拉平切角
+        let targetY = ballPos.y;
+        if (ch.isNear) {
+          const t = (25.0 - ch.edgeGap) / (25.0 - 4.0); // 0 ~ 1
+          targetY = rawTarget.y * (1 - t) + ballPos.y * t;
+        }
+        // 安全保护：不超过台面内壁物理极限
+        const maxSafeY = ch.railSign * ch.boundVal;
+        if (ch.railSign > 0) {
+          compensated.y = Math.min(targetY, maxSafeY);
+        } else {
+          compensated.y = Math.max(targetY, maxSafeY);
+        }
+        return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
+      }
+    } else if (ch.axis === 'x') {
+      // 顶底短边库：同理
+      isSameSide = Math.sign(rawTarget.x) === ch.railSign;
+      const dy = rawTarget.y - ballPos.y;
+      const isMovingTowardCorner = (Math.sign(dy) === Math.sign(rawTarget.y)) && Math.abs(dy) > 10;
+
+      if (isSameSide && isMovingTowardCorner) {
+        let targetX = ballPos.x;
+        if (ch.isNear) {
+          const t = (25.0 - ch.edgeGap) / (25.0 - 4.0);
+          targetX = rawTarget.x * (1 - t) + ballPos.x * t;
+        }
+        const maxSafeX = ch.railSign * ch.boundVal;
+        if (ch.railSign > 0) {
+          compensated.x = Math.min(targetX, maxSafeX);
+        } else {
+          compensated.x = Math.max(targetX, maxSafeX);
+        }
+        return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
+      }
+    }
+
+    return { targetPoint: rawTarget, cushionHug: ch, isCompensated: false };
+  }
+
+  /* ================================================================== */
   /* 进袋判定（几何扫描与容差置信度评估）                                   */
   /* ================================================================== */
 
-  function evaluatePocket(ballPos, dir, pocket) {
+  function evaluatePocket(ballPos, dir, pocket, customTarget = null) {
     if (!pocket || !pocket.opening) return null;
+    const targetPt = customTarget || pocket.opening;
     const normal = pocket.normal || V.norm(pocket.dropDirection || { x: 0, y: -1 });
     const tangent = pocket.tangent || { x: -normal.y, y: normal.x };
     const toward = V.dot(dir, normal);
     if (toward <= 1e-6) return null;
-    const v = V.sub(pocket.opening, ballPos);
+    const v = V.sub(targetPt, ballPos);
     const depth = V.dot(v, normal);
     if (depth <= 0) return null;
     const s = depth / toward;
     if (s <= 0) return null;
     const arrive = V.add(ballPos, V.scale(dir, s));
-    const tan = V.dot(V.sub(arrive, pocket.opening), tangent);
+    const tan = V.dot(V.sub(arrive, targetPt), tangent);
     const angleDeg = Math.acos(clamp(toward, -1, 1)) * 180 / Math.PI;
     const inc = incidenceAt(pocket.type, angleDeg);
     const half = inc.widthMm / 2;
@@ -2766,6 +2912,7 @@
     return {
       s, tan, half, angleDeg, widthMm: inc.widthMm, coef: inc.coef,
       alignConf, confidence, enterPoint: arrive,
+      targetPoint: targetPt,
     };
   }
 
@@ -3398,12 +3545,14 @@
     let pocket = null;
     let engineUsed = false;
     const autoAimReady = isAutoAimAvailable();
+    const tableBoundsObj = { boundX, boundY, cushionX, cushionY };
     for (const pk of pockets) {
-      const ev = evaluatePocket(targetBall.pos, n, pk);
+      const comp = resolveCompensatedPocketTarget(targetBall.pos, pk, tableBoundsObj);
+      const ev = evaluatePocket(targetBall.pos, n, pk, comp.targetPoint);
       if (!ev) continue;
       if (CONFIG.checkBlock &&
         pathBlocked(targetBall.pos, ev.enterPoint, objects, targetBall.id, state.cueBallId)) continue;
-      const cand = { ...pk, ...ev, dist: Math.abs(ev.tan) };
+      const cand = { ...pk, ...ev, dist: Math.abs(ev.tan), cushionHug: comp.cushionHug, isCompensated: comp.isCompensated };
       if (autoAimReady) {
         const route = queryEngineRoute(state, cue, targetBall, pk.id);
         if (route) {
@@ -3530,6 +3679,7 @@
       reboundSegments,
       pathLengthMm: polylineLength(verts),
       source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
+      cushionHug: pocket?.cushionHug || checkCushionHug(targetBall.pos, tableBoundsObj),
     };
 
     result.cuePost = null;
@@ -3581,6 +3731,13 @@
           tip,
           vertAngle
         );
+        // 贴库球专项推荐力度压制：避免系统错误推荐过大力量导致晃袋弹飞
+        const ch = geomPred.target.cushionHug || geomPred.target.pocket?.cushionHug;
+        if (ch && ch.isTight) {
+          recPower = clamp(recPower, 22, 32);
+        } else if (ch && ch.isNear) {
+          recPower = clamp(recPower, 22, 38);
+        }
       }
     }
 
@@ -4581,11 +4738,19 @@
           const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
           const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
 
+          const ch = t.cushionHug || t.pocket.cushionHug || (t.ball && checkCushionHug(t.ball.pos, { boundX: CONFIG.railBoundX, boundY: CONFIG.railBoundY }));
+          let hugPrefix = '';
+          if (ch && ch.isTight) {
+            hugPrefix = `📌贴库(${ch.edgeGap}mm) · `;
+          } else if (ch && ch.isNear) {
+            hugPrefix = `📐半贴库(${ch.edgeGap}mm) · `;
+          }
+
           if (isUnderpowered) {
             // 力度不足将目标球送入袋口时：使用警示橙红边框，将【力小推不到袋】放在最醒目首位
             const recText = pred.recPower ? `需${pred.recPower}%, 当前${effPower}%` : `当前仅${effPower}%`;
             this.drawTopHudPill(
-              `⚠️力小推不到袋 (${recText}) · ${t.pocket.label} · 切角 ${cutDeg}°${potWarning}`,
+              `${hugPrefix}⚠️力小推不到袋 (${recText}) · ${t.pocket.label} · 切角 ${cutDeg}°${potWarning}`,
               '#ff5500'
             );
           } else {
@@ -4593,14 +4758,21 @@
               ? '#ff4444'
               : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
             this.drawTopHudPill(
-              `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
+              `${hugPrefix}${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
               hudRingColor
             );
           }
         } else if (t && t.ball) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
+          const ch = t.cushionHug || (t.ball && checkCushionHug(t.ball.pos, { boundX: CONFIG.railBoundX, boundY: CONFIG.railBoundY }));
+          let hugPrefix = '';
+          if (ch && ch.isTight) {
+            hugPrefix = `📌贴库(${ch.edgeGap}mm) · `;
+          } else if (ch && ch.isNear) {
+            hugPrefix = `📐半贴库(${ch.edgeGap}mm) · `;
+          }
           this.drawTopHudPill(
-            `${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
+            `${hugPrefix}${kindLabel(t.ball.kind)} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
             (effPower > 0 && pred.cuePottedWarning) ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
           );
         } else if (pred.noTargetEnd) {
@@ -5839,6 +6011,8 @@
       predict,
       predictAim: predict,
       readTableBounds,
+      checkCushionHug,
+      resolveCompensatedPocketTarget,
       rayRailHit,
       trimPolyline,
       detectJunctions,
