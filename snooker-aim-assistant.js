@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.8
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.9
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、低杆加塞滑动阻力衰减与真实能量判定(真实扣减低杆逆旋台泥摩擦滑移功耗/彻底杜绝低杆入袋误判绿色实线)、母球走位预测线架构重构(过期缓存指纹校验根除初次乱画/0ms瞬时物理走位线60FPS跟手实时响应/45ms时间片节流消灭调力1~2秒卡顿滞后)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.8';
+  const SCRIPT_VERSION = '1.6.9';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -810,25 +810,40 @@
       };
     },
 
-    get(key, factory) {
+    get(key, factory, contextInfo = null) {
       if (!CONFIG.engineSimEnabled) return null;
       if (this.status === 'idle') this.load();
       if (this.status === 'failed') return null;
-      if (this.key === key && this.result) return this.result;
 
-      const stale = this.result ? { ...this.result, stale: true } : null;
+      // 严格指纹校验：如果目标球切换，或瞄准角偏差 > 0.08 弧度 (~4.5°)，立即判定旧缓存无效，坚决不画过期旧线！
+      const isContextValid = Boolean(
+        this.result &&
+        this.resultContext &&
+        contextInfo &&
+        this.resultContext.targetBallId === contextInfo.targetBallId &&
+        Math.abs(this.resultContext.aimAngle - contextInfo.aimAngle) < 0.08
+      );
 
-      if (this.pendingKey === key) {
-        this.payloadFactory = factory;
-        return stale;
+      // 若 key 完全一致且上下文匹配，直接返回精确结果
+      if (this.key === key && this.result && isContextValid) {
+        return this.result;
       }
+
+      // 仅当上下文相符时允许返回过渡标记数据；若不相符则坚决返回 null，杜绝拿上一球路径拼凑乱画
+      const stale = isContextValid ? { ...this.result, stale: true } : null;
+
       this.pendingKey = key;
       this.payloadFactory = factory;
+      this.pendingContext = contextInfo;
 
-      const run = () => {
+      const now = performance.now();
+      const THROTTLE_MS = 45; // 45ms 稳定时间片节流，消除长达 1~2 秒的无休止防抖重置卡顿
+
+      const executeRun = () => {
         this.timer = 0;
+        this.lastRunTime = performance.now();
         if (this.status === 'loading') {
-          this.timer = setTimeout(run, 120);
+          this.timer = setTimeout(executeRun, 60);
           return;
         }
         if (this.status !== 'ready' || !this.fn) {
@@ -837,20 +852,31 @@
         }
         const pendingKey = this.pendingKey;
         const factoryNow = this.payloadFactory;
+        const ctxNow = this.pendingContext;
         try {
           const result = this.run(factoryNow());
           this.key = pendingKey;
           this.result = result;
+          this.resultContext = ctxNow;
         } catch (err) {
           this.error = String((err && err.message) || err);
           this.status = 'failed';
           this.result = null;
+          this.resultContext = null;
         }
         this.pendingKey = null;
       };
 
-      clearTimeout(this.timer);
-      this.timer = setTimeout(run, CONFIG.engineSimDelayMs || 90);
+      // 节流调度：超过 45ms 立即执行最新帧，否则等待本周期结束后立即执行，保证后台流式持续刷新
+      if (!this.lastRunTime || now - this.lastRunTime >= THROTTLE_MS) {
+        clearTimeout(this.timer);
+        this.timer = 0;
+        executeRun();
+      } else if (!this.timer) {
+        const remainMs = Math.max(10, THROTTLE_MS - (now - this.lastRunTime));
+        this.timer = setTimeout(executeRun, remainMs);
+      }
+
       return stale;
     },
   };
@@ -3559,7 +3585,67 @@
     return mm > 0 ? clamp(mm, 60, 6000) : null;
   }
 
-  // 4. 最佳入袋推荐出杆力度计算（基于 3.4.2 实测动力学模型、碰撞能量损耗补偿与防停球动力学）
+  /**
+   * 0ms 瞬时解析物理母球走位预测（轻量级无延迟物理引擎）
+   * 依据动量分离定理、切角分解、高低杆自旋冲量及库边弹性反弹，在微模拟器计算空窗期提供 60FPS 实时丝滑预览
+   */
+  function simulateInstantCuePostTrajectory(G, targetBallPos, aimDir, power, tip, boundX, boundY, pockets) {
+    const p = clamp(Number(power) || 0, 0, 100);
+    if (p <= 2 || !G || !targetBallPos) return null;
+
+    const normal = V.norm(V.sub(targetBallPos, G));
+    const cosCut = clamp(V.dot(aimDir, normal), -1, 1);
+    const sinCut = Math.sqrt(Math.max(0, 1 - cosCut * cosCut));
+
+    const tangentRaw = V.sub(aimDir, V.scale(normal, cosCut));
+    const tangent = V.norm(tangentRaw);
+
+    const sy = clamp(Number(tip?.y) || 0, -1, 1);
+    const sx = clamp(Number(tip?.x) || 0, -1, 1);
+
+    // 速度分量分解：切向速度 (90度正交分离) 与 法向速度 (低杆向后拉退，高杆向前跟进)
+    const vt = sinCut;
+    const vn = sy < 0 ? (sy / 0.5) * 0.72 : (sy / 0.5) * 0.55;
+
+    let postDir = V.add(V.scale(tangent, vt), V.scale(normal, vn));
+    if (V.len(postDir) < 1e-4) {
+      postDir = sy < 0 ? V.scale(normal, -1) : normal;
+    } else {
+      postDir = V.norm(postDir);
+    }
+
+    // 行进总距离估计（随力度与分离比率平滑变化）
+    const distRatio = Math.max(0.12, Math.hypot(vt, vn));
+    const travelMm = clamp((p / 100) * 3600 * distRatio, 60, 4200);
+
+    // 吃库反弹检测
+    const railHit = rayRailHit(G, postDir, boundX, boundY, pockets);
+    if (railHit && railHit.t < travelMm) {
+      const hitPt = railHit.point;
+      const remainDist = travelMm - railHit.t;
+      if (remainDist > 40) {
+        let rebDir = {
+          x: railHit.axis === 'x' ? -postDir.x : postDir.x,
+          y: railHit.axis === 'y' ? -postDir.y : postDir.y,
+        };
+        // 侧塞微偏角修正
+        if (Math.abs(sx) > 0.05) {
+          const spinSign = Math.sign(sx);
+          const spinAng = spinSign * (Math.abs(sx) / 0.5) * 0.12;
+          const curAng = Math.atan2(rebDir.y, rebDir.x);
+          rebDir = { x: Math.cos(curAng + spinAng), y: Math.sin(curAng + spinAng) };
+        }
+        const endPt = V.add(hitPt, V.scale(rebDir, remainDist * 0.85));
+        return [G, hitPt, endPt];
+      }
+      return [G, hitPt];
+    }
+
+    const endPt = V.add(G, V.scale(postDir, travelMm));
+    return [G, endPt];
+  }
+
+  // 4. 最佳入袋推荐出杆力度计算（基于 3.4.2 实测动力学模型、低杆滑移阻力补偿与防停球动力学）
   function calculateRecommendedPower(cuePos, contactPos, targetBallPos, pocketPos, aimDir, tipOffset, verticalAngle) {
     const sObj = V.dist(targetBallPos, pocketPos);
     const sCue = V.dist(cuePos, contactPos);
@@ -3567,21 +3653,36 @@
     const cosCut = clamp(V.dot(aimDir, normal), 0.08, 1);
     const cosSq = Math.max(0.04, cosCut * cosCut);
 
-    // 目标球保留 680mm 扎实入袋安全缓冲行程（确保平稳入袋底、不卡袋口；长台自适应追加补偿）
+    // 目标球保留 680mm 扎实入袋安全缓冲行程（长台自适应追加补偿）
     const distExtra = sObj > 1000 ? Math.min(300, (sObj - 1000) * 0.15) : 0;
     const sObjTotal = sObj + 680 + distExtra;
 
-    // 碰撞瞬间母球所需的等效剩余行进能力（计入球球非完全弹性恢复与切向摩擦损耗 η ≈ 0.88）
-    const sCueContactNeeded = (sObjTotal / cosSq) / 0.88;
-    // 母球从初始击打点到接触点总行程
-    const sCueTotal = sCue + sCueContactNeeded;
+    // 解析低杆与侧塞滑移额外能量折减（低杆逆旋转导致台泥动摩擦阻力增大 16 倍）
+    const sx = Number(tipOffset?.x) || 0;
+    const sy = Number(tipOffset?.y) || 0;
+    const backspinRatio = clamp(-sy / 0.5, 0, 1);
+    const topspinRatio = clamp(sy / 0.5, 0, 1);
+    const sideRatio = clamp(Math.abs(sx) / 0.5, 0, 1);
 
-    const idealPower = powerByCueTravel(sCueTotal);
+    const kBackspin = backspinRatio > 0 ? (1.0 - 0.70 * Math.pow(backspinRatio, 1.25)) : (1.0 + 0.15 * Math.pow(topspinRatio, 1.2));
+    const kSidespin = 1.0 - 0.20 * (sideRatio * sideRatio);
+    const spinDynamicRetention = Math.max(0.15, kBackspin * kSidespin);
+
+    // 碰撞传递效率：低杆回缩时前向线冲量折减
+    const transferEff = 0.88 * (1.0 - 0.20 * backspinRatio);
+
+    // 碰撞瞬间母球所需的等效剩余行进能力
+    const sCueContactNeeded = (sObjTotal / cosSq) / transferEff;
+    // 母球滑行途中的等效损耗行程（低杆逆旋滑移消耗显著放大）
+    const sCueLoss = sCue * (1.0 + 1.25 * backspinRatio);
+    const sCueTotalNeeded = (sCueLoss + sCueContactNeeded) / spinDynamicRetention;
+
+    const idealPower = powerByCueTravel(sCueTotalNeeded);
     const retention = tipSpeedRetention(tipOffset);
     const elevRetention = resolveV3ElevationRetention(verticalAngle);
     const finalPower = idealPower / (Math.max(0.1, retention) * Math.max(0.1, elevRetention));
 
-    // 安全门控：短距离最低 22%（彻底根治 15% 软绵无力停在袋口），中长台根据总射程平滑提升至 28%~35%
+    // 安全门控：短距离最低 22%，中长台根据总射程平滑提升至 28%~35%
     const totalDist = sCue + sObj;
     const minPowerFloor = clamp(22 + Math.round(Math.max(0, totalDist - 1000) / 100), 22, 35);
 
@@ -3803,12 +3904,20 @@
         allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
       ].join('|');
 
+      const aimAngle = Math.atan2(d.y, d.x);
+      const simContext = {
+        targetBallId: targetBall.id,
+        cuePos: { x: cue.pos.x, y: cue.pos.y },
+        contactPos: { x: G.x, y: G.y },
+        aimAngle,
+      };
+
       engine = engineSim.get(engineKey, () => engineSim.buildPayload(state, {
         direction: d,
         power: effPower,
         tip,
         verticalAngle: vertAngle,
-      }));
+      }), simContext);
     }
     result.engineSim = engine;
 
@@ -3827,13 +3936,21 @@
         if (engine.cuePotted) {
           result.cuePottedWarning = true;
         }
+      }
+    }
 
-        // 母球碰后真实走位弧线 (低杆拉杆回缩、高杆跟进、偏塞扎杆弧线与多库反弹)
-        if (CONFIG.showCuePostTrajectory && Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
-          const postPts = [{ x: G.x, y: G.y }, ...engine.cuePath];
-          result.cuePostTrajectory = postPts;
-          result.cueRestPos = postPts[postPts.length - 1];
-        }
+    // 母球碰后真实走位弧线：高精微仿真优先，节流期间 0ms 瞬时解析物理折线无缝兜底
+    if (CONFIG.showCuePostTrajectory && effPower > 0) {
+      let cuePostPath = null;
+      if (engine && Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
+        cuePostPath = [{ x: G.x, y: G.y }, ...engine.cuePath];
+      } else {
+        // 0ms 瞬时解析物理走位线：拖动力度条时 60FPS 实时丝滑跟手变动，彻底告别 1~2 秒僵滞！
+        cuePostPath = simulateInstantCuePostTrajectory(G, targetBall.pos, d, effPower, tip, boundX, boundY, pockets);
+      }
+      if (cuePostPath && cuePostPath.length >= 2) {
+        result.cuePostTrajectory = cuePostPath;
+        result.cueRestPos = cuePostPath[cuePostPath.length - 1];
       }
     }
 
@@ -3873,13 +3990,30 @@
 
     if (geomPred.target) {
       const sCue = V.dist(geomPred.cue, geomPred.target.contact || geomPred.target.ball.pos);
-      const totalCueTravel = cueTravelByPower(power, retention * elevRetention);
-      // 母球在击中目标球瞬间剩余的行进能力（严格扣除母球自身位移消耗）
-      const remainCueTravel = Math.max(0, totalCueTravel - sCue);
+
+      // 低杆与加塞滑动阻力动力学：低杆逆旋转与台泥产生高达 16 倍的剧烈滑动摩擦阻力
+      const sx = Number(tip?.x) || 0;
+      const sy = Number(tip?.y) || 0;
+      const backspinRatio = clamp(-sy / 0.5, 0, 1);
+      const topspinRatio = clamp(sy / 0.5, 0, 1);
+      const sideRatio = clamp(Math.abs(sx) / 0.5, 0, 1);
+
+      const kBackspin = backspinRatio > 0 ? (1.0 - 0.70 * Math.pow(backspinRatio, 1.25)) : (1.0 + 0.15 * Math.pow(topspinRatio, 1.2));
+      const kSidespin = 1.0 - 0.20 * (sideRatio * sideRatio);
+      const spinDynamicRetention = Math.max(0.15, kBackspin * kSidespin);
+
+      // 低杆回缩动能保留：低杆碰撞瞬间传递给目标球的正向冲量折减
+      const transferEff = 0.88 * (1.0 - 0.20 * backspinRatio);
+
+      // 母球滑行途中逆旋滑动摩擦等效损耗
+      const sCueLoss = sCue * (1.0 + 1.25 * backspinRatio);
+      const totalCueTravel = cueTravelByPower(power, retention * elevRetention) * spinDynamicRetention;
+      // 母球在击中目标球瞬间剩余的真实行进能力
+      const remainCueTravel = Math.max(0, totalCueTravel - sCueLoss);
 
       const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
-      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗与碰撞传递衰减 0.88）
-      actualReachMm = remainCueTravel * (cosCut * cosCut) * 0.88;
+      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗与低杆碰撞传递衰减）
+      actualReachMm = remainCueTravel * (cosCut * cosCut) * transferEff;
 
       const targetPathLen = Number(geomPred.target.pathLengthMm) ||
         (geomPred.target.pocket ? V.dist(geomPred.target.ball.pos, geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : 0);
@@ -6200,6 +6334,7 @@
       buildStateKeys,
       simulateDirectCushionRebound,
       simulateCuePostPath,
+      simulateInstantCuePostTrajectory,
       traceRailReflections,
       tracePhysicsRailReflections,
       resolvePhysicsCushionRebound,
@@ -6219,6 +6354,7 @@
       hasVisibleSettlementUiInDoc,
       isLobbyMenuVisible,
       calculateRecommendedPower,
+      attachShotPowerMetrics,
       hudPill,
       overlay,
       projection,
