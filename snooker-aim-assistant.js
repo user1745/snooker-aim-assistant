@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.3
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台自由选球/智能力度击球/死局冲球解围/连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.4
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台红球优先/智能力度击球/红球堆冲球解围/两阶段连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.3';
+  const SCRIPT_VERSION = '1.6.4';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -60,7 +60,6 @@
     showObjectLine: true,
     showCueLine: true,
     showCuePostTrajectory: true,
-    doubleClickAlign: true,
     showHudPill: true,
     showDebug: false,
 
@@ -119,7 +118,6 @@
     'showCueLine',
     'showCuePostTrajectory',
     'showCushionRebound',
-    'doubleClickAlign',
     'showHudPill',
     'showDebug',
   ];
@@ -1883,8 +1881,33 @@
       return false;
     }
 
-    // 彻底解除斯诺克规则感知与阶段锁定：所有未进袋目标球均为完全平等的合法击打候选球！
-    const candidateBalls = objects;
+    // 严格遵循斯诺克分阶段规则：台面上只要有红球，必须优先清理红球；红球全清后才按分值清理彩球
+    const redBalls = objects.filter((b) => b.kind === 'red');
+    const hasReds = redBalls.length > 0;
+
+    // 彩球法定分值顺序：黄(2) -> 绿(3) -> 咖啡(4) -> 蓝(5) -> 粉(6) -> 黑(7)
+    const COLOR_ORDER = ['yellow', 'green', 'brown', 'blue', 'pink', 'black'];
+
+    let candidateBalls = [];
+    if (hasReds) {
+      // 阶段一【红球优先阶段】：只要还有红球，候选击打目标球严格且仅限红球！彩球全为不可击打障碍球
+      candidateBalls = redBalls;
+    } else {
+      // 阶段二【清彩球阶段】：红球已全部进袋，按斯诺克法定最小分值彩球优先清理
+      let lowestKind = null;
+      for (const k of COLOR_ORDER) {
+        if (objects.some((b) => b.kind === k)) {
+          lowestKind = k;
+          break;
+        }
+      }
+      if (lowestKind) {
+        candidateBalls = objects.filter((b) => b.kind === lowestKind);
+      }
+      if (!candidateBalls.length) {
+        candidateBalls = objects; // 兜底保护
+      }
+    }
 
     // 1. 识别用户当前瞄准意图的目标球 (物理相交优先 > 准星中心垂直距离 perp)
     let userAimedBall = null;
@@ -1908,6 +1931,10 @@
           userAimedBall = b;
         }
       }
+    }
+    // 若用户瞄准的球不属于当前阶段合法候选球，清除该意向，强制从合法候选球中选球
+    if (userAimedBall && !candidateBalls.some((b) => b.id === userAimedBall.id)) {
+      userAimedBall = null;
     }
 
     // 2. 核心下球路线验证函数 (四大物理法则：进袋判定 + 切角限制 <= 75° + 双重无阻挡通道)
@@ -2083,7 +2110,9 @@
     const strikePower = isBreakup ? 100 : clamp(chosenRoute.recommendedPower || 50, 15, 100);
 
     if (isBreakup) {
-      targetDesc = `💥 无直接下球，100%满力冲球解围「${kindLabel(bestBall.kind)}」`;
+      targetDesc = hasReds
+        ? `💥 红球无直接下球，100%满力冲散红球堆解围「${kindLabel(bestBall.kind)}」`
+        : `💥 彩球无直接下球，100%满力解围「${kindLabel(bestBall.kind)}」`;
     } else {
       targetDesc = `🎯「${kindLabel(bestBall.kind)}」进「${targetPocket.label}」· 切角 ${Math.round(cutAngleDeg)}° · 力度 ${strikePower}%`;
     }
@@ -3469,12 +3498,23 @@
 
     let insufficientPower = false;
     let recPower = null;
+    let actualReachMm = null;
 
-    if (geomPred.target && geomPred.target.pocket) {
-      if (power > 2) {
-        const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
-        const maxReachMm = reachCapFallback(power, cosCut);
-        if (maxReachMm != null && maxReachMm < (geomPred.target.pathLengthMm || 0) * 0.95) {
+    if (geomPred.target) {
+      const sCue = V.dist(geomPred.cue, geomPred.target.contact || geomPred.target.ball.pos);
+      const totalCueTravel = cueTravelByPower(power, retention * elevRetention);
+      // 母球在击中目标球瞬间剩余的行进能力（严格扣除母球自身位移消耗）
+      const remainCueTravel = Math.max(0, totalCueTravel - sCue);
+
+      const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
+      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗）
+      actualReachMm = remainCueTravel * (cosCut * cosCut);
+
+      const targetPathLen = Number(geomPred.target.pathLengthMm) ||
+        (geomPred.target.pocket ? V.dist(geomPred.target.ball.pos, geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : 0);
+
+      if (power > 2 && targetPathLen > 0) {
+        if (actualReachMm < targetPathLen * 0.96) {
           insufficientPower = true;
         }
       }
@@ -3484,7 +3524,7 @@
           geomPred.cue,
           geomPred.target.contact,
           geomPred.target.ball.pos,
-          geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening,
+          geomPred.target.pocket ? (geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : V.add(geomPred.target.ball.pos, V.scale(geomPred.target.objectDir, targetPathLen || 800)),
           geomPred.aimDir,
           tip,
           vertAngle
@@ -3496,6 +3536,7 @@
       ...geomPred,
       power,
       effSpeed,
+      actualReachMm,
       insufficientPower,
       recPower,
       roomMode: detectCurrentRoomMode(state),
@@ -4249,18 +4290,25 @@
         }
       }
 
-      // 2) 目标球延长线：从目标球球心起画 (绿色瞄准线)
+      // 2) 目标球延长线：从目标球球心起画 (若拉杆力度不足以入袋则转为警告橙色虚线)
       if (t && CONFIG.showObjectLine && Array.isArray(t.objectPath) && t.objectPath.length >= 2) {
+        const isUnderpowered = currentEffPower > 2 && Boolean(pred.insufficientPower);
         const pxPts = t.objectPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
 
         if (pxPts.length >= 2) {
           hasProjected = true;
           ctx.save();
-          ctx.strokeStyle = CONFIG.objectLineColor;
-          ctx.lineWidth = CONFIG.objectLineWidthPx;
+          if (isUnderpowered) {
+            ctx.strokeStyle = '#ff9f43';
+            ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
+            ctx.setLineDash([6, 4]); // 虚线直观表示行进距离受限推不到袋底
+          } else {
+            ctx.strokeStyle = CONFIG.objectLineColor || '#00ff88';
+            ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
+            ctx.setLineDash([]);
+          }
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
-          ctx.setLineDash([]);
           ctx.beginPath();
           ctx.moveTo(pxPts[0].x, pxPts[0].y);
           for (let i = 1; i < pxPts.length; i++) {
@@ -4374,16 +4422,25 @@
         } else if (t && t.pocket) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           const isUnderpowered = effPower > 2 && Boolean(pred.insufficientPower);
-          const underpoweredWarning = isUnderpowered ? ' · ⚠️力度偏小可能无法进袋' : '';
           const conf = isUnderpowered ? 0.25 : (t.pocket.confidence ?? 1);
           const solid = !isUnderpowered && conf >= POCKET_SOLID_THRESHOLD;
-          const hudRingColor = (effPower > 0 && pred.cuePottedWarning)
-            ? '#ff4444'
-            : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
-          this.drawTopHudPill(
-            `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${underpoweredWarning}${potWarning}`,
-            hudRingColor
-          );
+
+          if (isUnderpowered) {
+            // 力度不足将目标球送入袋口时：使用警示橙红边框，将【力小推不到袋】放在最醒目首位
+            const recText = pred.recPower ? `需${pred.recPower}%, 当前${effPower}%` : `当前仅${effPower}%`;
+            this.drawTopHudPill(
+              `⚠️力小推不到袋 (${recText}) · ${t.pocket.label} · 切角 ${cutDeg}°${potWarning}`,
+              '#ff5500'
+            );
+          } else {
+            const hudRingColor = (effPower > 0 && pred.cuePottedWarning)
+              ? '#ff4444'
+              : (solid ? (CONFIG.pocketRingColor || '#00ff88') : (CONFIG.pocketEdgeColor || '#ff8c33'));
+            this.drawTopHudPill(
+              `${t.pocket.label} · 切角 ${cutDeg}° · 力度 ${effPower}% · ${tipText}${potWarning}`,
+              hudRingColor
+            );
+          }
         } else if (t && t.ball) {
           const cutDeg = Math.round(t.cutAngleDeg || 0);
           this.drawTopHudPill(
