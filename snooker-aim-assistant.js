@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.7
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、贴库球与半贴库球专项自适应瞄准补偿(精准检测净空≤4mm全贴库与≤25mm半贴库/平行库壁导向切线自适应平移入袋点/杜绝撞击外角嘴晃袋/22%~32%贴库轻推安全力度压制/HUD浮标联动显示贴库与净空)、智能开球与死局冲球解围算法(严格首碰合法性校验/绕过蓝球外侧通视通道/杜绝误击蓝球犯规/65%可控稳健冲球)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.6.8
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、贴库与亨得利半贴库双平行线擦角检测(台球半径双包络线检测袋嘴擦边/自动由开口中心向同侧库边自适应平移5~8mm补偿/杜绝晃袋不进/22%~38%贴库轻推安全力度)、死局全自动破局(红球通道全被阻挡时自动击打最优彩球借力破局/彻底无需用户人工干预)、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.6.7';
+  const SCRIPT_VERSION = '1.6.8';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1983,7 +1983,7 @@
       // 贴库球专项安全力度压制（落实台球铁律：贴库轻推，力大必晃）
       if (compResult.cushionHug.isTight) {
         recommendedPower = clamp(recommendedPower, 22, 32);
-      } else if (compResult.cushionHug.isNear) {
+      } else if (compResult.cushionHug.isNear || compResult.cushionHug.isJawClipping) {
         recommendedPower = clamp(recommendedPower, 22, 38);
       }
 
@@ -2096,24 +2096,86 @@
         }
       }
 
-      // 阶段 3.2: 终极安全保护——若全台所有角度都无法直线首碰红球（全被彩球阻挡）
+      // 阶段 3.2: 若全台所有角度都无法直线首碰红球（全被彩球阻挡），启动第二级：彩球借力破局
       if (!bestBreakup) {
-        // 绝不盲目对着蓝球或障碍球击打！提示玩家微调母球位置
-        showToast('⚠️ 开球通道全被彩球阻挡，请在D区内微调母球位置', 2000);
-        return false;
-      }
+        // 搜索视野内所有可直接首碰的彩球，选择距离与方位最优的彩球进行借力击打破局
+        const colorBalls = objects.filter((b) => b.kind !== 'red');
+        let bestColorBreakup = null;
+        let bestColorScore = -Infinity;
 
-      chosenRoute = {
-        ball: bestBreakup.ball,
-        pocket: null,
-        contactG: bestBreakup.contactG,
-        cueDir: bestBreakup.cueDir,
-        cutDot: bestBreakup.cutDot,
-        cutAngleDeg: bestBreakup.cutAngleDeg,
-        confidence: 0,
-        score: 0,
-        isBreakup: true,
-      };
+        for (const cb of colorBalls) {
+          const dir = V.norm(V.sub(cb.pos, cue.pos));
+          const fc = getFirstContactBall(dir);
+          // 只要母球能直线首碰该彩球
+          if (fc && fc.ball.id === cb.id) {
+            const dist = V.dist(cue.pos, cb.pos);
+            // 评分：优先距离适中（如中台蓝球/粉球/咖啡球）、首碰扎实的彩球
+            const score = 1000 - dist;
+            if (score > bestColorScore) {
+              bestColorScore = score;
+              bestColorBreakup = {
+                ball: cb,
+                contactG: fc.contact,
+                cueDir: dir,
+                cutDot: 1.0,
+                cutAngleDeg: 0,
+              };
+            }
+          }
+        }
+
+        // 若找到可直碰的彩球，以 50% 可控力度出杆借力破局，打破死局继续自动化推进
+        if (bestColorBreakup) {
+          chosenRoute = {
+            ball: bestColorBreakup.ball,
+            pocket: null,
+            contactG: bestColorBreakup.contactG,
+            cueDir: bestColorBreakup.cueDir,
+            cutDot: bestColorBreakup.cutDot,
+            cutAngleDeg: bestColorBreakup.cutAngleDeg,
+            confidence: 0,
+            score: 0,
+            isBreakup: true,
+            isColorBreakout: true,
+          };
+        } else {
+          // 极度贴身死锁兜底：直接朝台面最近的障碍球击打
+          const anyTarget = colorBalls[0] || objects[0];
+          if (anyTarget) {
+            const dir = V.norm(V.sub(anyTarget.pos, cue.pos));
+            chosenRoute = {
+              ball: anyTarget,
+              pocket: null,
+              contactG: anyTarget.pos,
+              cueDir: dir,
+              cutDot: 1.0,
+              cutAngleDeg: 0,
+              confidence: 0,
+              score: 0,
+              isBreakup: true,
+              isColorBreakout: true,
+            };
+          }
+        }
+      } else {
+        chosenRoute = {
+          ball: bestBreakup.ball,
+          pocket: null,
+          contactG: bestBreakup.contactG,
+          cueDir: bestBreakup.cueDir,
+          cutDot: bestBreakup.cutDot,
+          cutAngleDeg: bestBreakup.cutAngleDeg,
+          confidence: 0,
+          score: 0,
+          isBreakup: true,
+          isColorBreakout: false,
+        };
+      }
+    }
+
+    if (!chosenRoute) {
+      showToast('⚠️ 未能找到有效出杆路线', 1500);
+      return false;
     }
 
     const { ball: bestBall, pocket: targetPocket, cueDir: perfectAimDir, cutAngleDeg, isBreakup } = chosenRoute;
@@ -2171,22 +2233,31 @@
     _lastRenderKey = null;
 
     let targetDesc = '';
-    let strikePower = isBreakup ? 65 : clamp(chosenRoute.recommendedPower || 50, 20, 100);
-    // 终极安全校验：对贴库球出杆力度严格压制
+    let strikePower = isBreakup
+      ? (chosenRoute.isColorBreakout ? 50 : 65)
+      : clamp(chosenRoute.recommendedPower || 50, 20, 100);
+
+    // 终极安全校验：对贴库球与半贴库擦角补偿球出杆力度严格压制
     if (chosenRoute.cushionHug?.isTight) {
       strikePower = clamp(strikePower, 22, 32);
-    } else if (chosenRoute.cushionHug?.isNear) {
+    } else if (chosenRoute.cushionHug?.isJawClipping || chosenRoute.cushionHug?.isNear) {
       strikePower = clamp(strikePower, 22, 38);
     }
 
     if (isBreakup) {
-      targetDesc = hasReds
-        ? `💥 红球无直接下球，65%可控力度冲散红球堆解围「${kindLabel(bestBall.kind)}」`
-        : `💥 彩球无直接下球，65%可控力度解围「${kindLabel(bestBall.kind)}」`;
+      if (chosenRoute.isColorBreakout) {
+        targetDesc = `💥 红球通道全受阻，50%可控力度击打「${kindLabel(bestBall.kind)}」借力破局`;
+      } else {
+        targetDesc = hasReds
+          ? `💥 红球无直接下球，65%可控力度冲散红球堆解围「${kindLabel(bestBall.kind)}」`
+          : `💥 彩球无直接下球，65%可控力度解围「${kindLabel(bestBall.kind)}」`;
+      }
     } else {
       let hugTag = '';
       if (chosenRoute.cushionHug?.isTight) {
         hugTag = ` · 📌贴库(${chosenRoute.cushionHug.edgeGap}mm)修正`;
+      } else if (chosenRoute.cushionHug?.isJawClipping) {
+        hugTag = ` · 📐擦角补偿(${chosenRoute.cushionHug.compOffset}mm)`;
       } else if (chosenRoute.cushionHug?.isNear) {
         hugTag = ` · 📐半贴库(${chosenRoute.cushionHug.edgeGap}mm)修正`;
       }
@@ -2194,7 +2265,9 @@
     }
 
     if (autoStrike) {
-      const pwrLabel = isBreakup ? '65%稳健冲球出杆!' : `力度 ${strikePower}% 出杆!`;
+      const pwrLabel = chosenRoute.isColorBreakout
+        ? '50%借力破局出杆!'
+        : (isBreakup ? '65%稳健冲球出杆!' : `力度 ${strikePower}% 出杆!`);
       showToast(`${targetDesc} · ${pwrLabel}`, 1500);
       setTimeout(() => {
         triggerStrike(null, strikePower);
@@ -2813,72 +2886,169 @@
   }
 
   /**
+   * 刚体扫掠双平行线擦角碰撞检测（以绿色瞄准线为中间线，左右各一条相距球半径 26.25mm 的平行线）
+   * 分析靠库侧外边缘包络线是否会与进入的袋口库嘴（Pocket Jaw）及库木发生擦边碰撞
+   * @param {Object} ballPos 目标球二维位置
+   * @param {Object} rawTarget 原始目标点（通常为 pk.opening）
+   * @param {Object} pk 袋口对象
+   * @param {Object} tableBounds 台面有效边界
+   * @returns {Object} { isClipping, minGap, compOffset, axis, railSign }
+   */
+  function checkParallelRayJawClipping(ballPos, rawTarget, pk, tableBounds) {
+    if (!pk || (pk.type !== 'corner' && !(pk.id && pk.id.includes('corner')))) {
+      return { isClipping: false, minGap: Infinity, compOffset: 0, axis: null, railSign: 0 };
+    }
+    const bY = (tableBounds && Number.isFinite(tableBounds.boundY)) ? tableBounds.boundY : (CONFIG.railBoundY || 862.75);
+    const cY = (tableBounds && Number.isFinite(tableBounds.cushionY)) ? tableBounds.cushionY : (bY + BALL_RADIUS_MM);
+    const bX = (tableBounds && Number.isFinite(tableBounds.boundX)) ? tableBounds.boundX : (CONFIG.railBoundX || 1758.1);
+    const cX = (tableBounds && Number.isFinite(tableBounds.cushionX)) ? tableBounds.cushionX : (bX + BALL_RADIUS_MM);
+
+    const dx = rawTarget.x - ballPos.x;
+    const dy = rawTarget.y - ballPos.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 30) {
+      return { isClipping: false, minGap: Infinity, compOffset: 0, axis: null, railSign: 0 };
+    }
+
+    // 1) 长库沿库滑行擦角检测 (例如亨得利球型：半贴长库进角袋)
+    const railSignY = Math.sign(ballPos.y || 1);
+    const isSameSideLongRail = (Math.sign(rawTarget.y) === railSignY) && (Math.abs(ballPos.y) > 550);
+    const isMovingTowardCornerX = (Math.sign(dx) === Math.sign(rawTarget.x)) && (Math.abs(dx) > 10);
+
+    if (isSameSideLongRail && isMovingTowardCornerX) {
+      // 沿瞄准线采样，分析靠长库一侧外轮廓平行线与库木的净空
+      let minGap = Infinity;
+      const steps = 24;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const cy = ballPos.y + t * dy;
+        const outerY = cy + railSignY * BALL_RADIUS_MM;
+        const gap = cY - Math.abs(outerY);
+        if (gap < minGap) minGap = gap;
+      }
+
+      // 若靠库侧平行线与库木净空小于安全间隙 1.5mm (或为负数，已穿透擦碰库嘴)
+      if (minGap < 1.5) {
+        const clipDepth = Math.max(0, 1.5 - minGap);
+        // 按照贴库球瞄准方式由开口正中平移微调 5~8mm
+        const compOffset = clamp(Math.round((5.5 + clipDepth * 0.7) * 10) / 10, 5.0, 8.0);
+        return { isClipping: true, minGap: Math.round(minGap * 10) / 10, compOffset, axis: 'y', railSign: railSignY };
+      }
+    }
+
+    // 2) 顶底短库沿库滑行擦角检测
+    const railSignX = Math.sign(ballPos.x || 1);
+    const isSameSideShortRail = (Math.sign(rawTarget.x) === railSignX) && (Math.abs(ballPos.x) > 1200);
+    const isMovingTowardCornerY = (Math.sign(dy) === Math.sign(rawTarget.y)) && (Math.abs(dy) > 10);
+
+    if (isSameSideShortRail && isMovingTowardCornerY) {
+      let minGap = Infinity;
+      const steps = 24;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const cx = ballPos.x + t * dx;
+        const outerX = cx + railSignX * BALL_RADIUS_MM;
+        const gap = cX - Math.abs(outerX);
+        if (gap < minGap) minGap = gap;
+      }
+
+      if (minGap < 1.5) {
+        const clipDepth = Math.max(0, 1.5 - minGap);
+        const compOffset = clamp(Math.round((5.5 + clipDepth * 0.7) * 10) / 10, 5.0, 8.0);
+        return { isClipping: true, minGap: Math.round(minGap * 10) / 10, compOffset, axis: 'x', railSign: railSignX };
+      }
+    }
+
+    return { isClipping: false, minGap: Infinity, compOffset: 0, axis: null, railSign: 0 };
+  }
+
+  /**
    * 解析入袋目标点：对同侧角袋的贴库/半贴库球执行自适应平移补偿，
-   * 使目标球轨迹平行于库边切入袋门，杜绝切向偏内撞击外角嘴（Jaw）剧烈晃袋
+   * 采用双平行线擦角检测，自适应由开口正中平移 5~8mm，杜绝擦库撞嘴（Jaw）剧烈晃袋
    * @param {Object} ballPos 目标球位置
    * @param {Object} pk 袋口对象（含 id, type, opening, normal 等）
    * @param {Object} [tableBounds] 台面有效边界
    * @returns {Object} { targetPoint, cushionHug, isCompensated }
    */
   function resolveCompensatedPocketTarget(ballPos, pk, tableBounds) {
-    const ch = checkCushionHug(ballPos, tableBounds);
     const rawTarget = (pk && (pk.opening || pk.center)) ? { x: (pk.opening || pk.center).x, y: (pk.opening || pk.center).y } : { x: 0, y: 0 };
-    if (!ch.isHug || !pk) {
-      return { targetPoint: rawTarget, cushionHug: ch, isCompensated: false };
+    if (!ballPos || !pk) {
+      return { targetPoint: rawTarget, cushionHug: checkCushionHug(ballPos, tableBounds), isCompensated: false };
     }
 
-    // 只有进角袋且目标球沿同侧库边走向袋口时，才需要平行贴库补偿；中袋为横向射入，不适用长库滑行
+    const ch = checkCushionHug(ballPos, tableBounds);
     const isCorner = pk.type === 'corner' || (pk.id && pk.id.includes('corner'));
     if (!isCorner) {
       return { targetPoint: rawTarget, cushionHug: ch, isCompensated: false };
     }
 
-    let isSameSide = false;
-    let compensated = { x: rawTarget.x, y: rawTarget.y };
+    // 1) 严密检测双平行线（中间线左右各一个球半径 26.25mm）是否会与袋口库嘴擦边
+    const clip = checkParallelRayJawClipping(ballPos, rawTarget, pk, tableBounds);
 
-    if (ch.axis === 'y') {
-      // 长边库：目标球与袋口在同侧（同一 Y 符号）
-      isSameSide = Math.sign(rawTarget.y) === ch.railSign;
-      // 目标球必须处于朝向该角袋滑行的来向区域（X 坐标在角袋内侧，且与角袋中心保持有效距离）
-      const dx = rawTarget.x - ballPos.x;
-      const isMovingTowardCorner = (Math.sign(dx) === Math.sign(rawTarget.x)) && Math.abs(dx) > 10;
-
-      if (isSameSide && isMovingTowardCorner) {
-        // 全贴库(<=4mm): 目标点 Y 坐标严格锁定为目标球的 Y 坐标，形成完全平行于长库的笔直线！
-        // 半贴库(4~25mm): 依据接近程度在线性权重过渡到目标球 Y 坐标，拉平切角
-        let targetY = ballPos.y;
-        if (ch.isNear) {
-          const t = (25.0 - ch.edgeGap) / (25.0 - 4.0); // 0 ~ 1
-          targetY = rawTarget.y * (1 - t) + ballPos.y * t;
+    // 2) 若全贴库(<=4mm): 目标点坐标严格锁定为目标球同轴坐标，形成完全平行于库壁的黄金滑行切线
+    if (ch.isTight) {
+      let compensated = { x: rawTarget.x, y: rawTarget.y };
+      if (ch.axis === 'y') {
+        const isSameSide = Math.sign(rawTarget.y) === ch.railSign;
+        const dx = rawTarget.x - ballPos.x;
+        const isMovingTowardCorner = (Math.sign(dx) === Math.sign(rawTarget.x)) && Math.abs(dx) > 10;
+        if (isSameSide && isMovingTowardCorner) {
+          const maxSafeY = ch.railSign * ch.boundVal;
+          compensated.y = ch.railSign > 0 ? Math.min(ballPos.y, maxSafeY) : Math.max(ballPos.y, maxSafeY);
+          return { targetPoint: compensated, cushionHug: { ...ch, isJawClipping: clip.isClipping }, isCompensated: true };
         }
-        // 安全保护：不超过台面内壁物理极限
-        const maxSafeY = ch.railSign * ch.boundVal;
-        if (ch.railSign > 0) {
-          compensated.y = Math.min(targetY, maxSafeY);
-        } else {
-          compensated.y = Math.max(targetY, maxSafeY);
+      } else if (ch.axis === 'x') {
+        const isSameSide = Math.sign(rawTarget.x) === ch.railSign;
+        const dy = rawTarget.y - ballPos.y;
+        const isMovingTowardCorner = (Math.sign(dy) === Math.sign(rawTarget.y)) && Math.abs(dy) > 10;
+        if (isSameSide && isMovingTowardCorner) {
+          const maxSafeX = ch.railSign * ch.boundVal;
+          compensated.x = ch.railSign > 0 ? Math.min(ballPos.x, maxSafeX) : Math.max(ballPos.x, maxSafeX);
+          return { targetPoint: compensated, cushionHug: { ...ch, isJawClipping: clip.isClipping }, isCompensated: true };
         }
-        return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
       }
-    } else if (ch.axis === 'x') {
-      // 顶底短边库：同理
-      isSameSide = Math.sign(rawTarget.x) === ch.railSign;
-      const dy = rawTarget.y - ballPos.y;
-      const isMovingTowardCorner = (Math.sign(dy) === Math.sign(rawTarget.y)) && Math.abs(dy) > 10;
+    }
 
-      if (isSameSide && isMovingTowardCorner) {
-        let targetX = ballPos.x;
-        if (ch.isNear) {
+    // 3) 亨得利球型与半贴库球：双平行线检测到擦边碰撞
+    if (clip.isClipping) {
+      let compensated = { x: rawTarget.x, y: rawTarget.y };
+      if (clip.axis === 'y') {
+        // 由开口正中沿同侧库边方向安全平移 5~8mm 消除擦边
+        compensated.y = rawTarget.y - clip.railSign * clip.compOffset;
+        const hugInfo = { ...ch, isNear: true, isJawClipping: true, compOffset: clip.compOffset, minGap: clip.minGap };
+        return { targetPoint: compensated, cushionHug: hugInfo, isCompensated: true };
+      } else if (clip.axis === 'x') {
+        compensated.x = rawTarget.x - clip.railSign * clip.compOffset;
+        const hugInfo = { ...ch, isNear: true, isJawClipping: true, compOffset: clip.compOffset, minGap: clip.minGap };
+        return { targetPoint: compensated, cushionHug: hugInfo, isCompensated: true };
+      }
+    }
+
+    // 4) 常规半贴库(4~25mm) 平滑插值兜底
+    if (ch.isNear) {
+      let compensated = { x: rawTarget.x, y: rawTarget.y };
+      if (ch.axis === 'y') {
+        const isSameSide = Math.sign(rawTarget.y) === ch.railSign;
+        const dx = rawTarget.x - ballPos.x;
+        const isMovingTowardCorner = (Math.sign(dx) === Math.sign(rawTarget.x)) && Math.abs(dx) > 10;
+        if (isSameSide && isMovingTowardCorner) {
           const t = (25.0 - ch.edgeGap) / (25.0 - 4.0);
-          targetX = rawTarget.x * (1 - t) + ballPos.x * t;
+          const targetY = rawTarget.y * (1 - t) + ballPos.y * t;
+          const maxSafeY = ch.railSign * ch.boundVal;
+          compensated.y = ch.railSign > 0 ? Math.min(targetY, maxSafeY) : Math.max(targetY, maxSafeY);
+          return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
         }
-        const maxSafeX = ch.railSign * ch.boundVal;
-        if (ch.railSign > 0) {
-          compensated.x = Math.min(targetX, maxSafeX);
-        } else {
-          compensated.x = Math.max(targetX, maxSafeX);
+      } else if (ch.axis === 'x') {
+        const isSameSide = Math.sign(rawTarget.x) === ch.railSign;
+        const dy = rawTarget.y - ballPos.y;
+        const isMovingTowardCorner = (Math.sign(dy) === Math.sign(rawTarget.y)) && Math.abs(dy) > 10;
+        if (isSameSide && isMovingTowardCorner) {
+          const t = (25.0 - ch.edgeGap) / (25.0 - 4.0);
+          const targetX = rawTarget.x * (1 - t) + ballPos.x * t;
+          const maxSafeX = ch.railSign * ch.boundVal;
+          compensated.x = ch.railSign > 0 ? Math.min(targetX, maxSafeX) : Math.max(targetX, maxSafeX);
+          return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
         }
-        return { targetPoint: compensated, cushionHug: ch, isCompensated: true };
       }
     }
 
@@ -3731,11 +3901,11 @@
           tip,
           vertAngle
         );
-        // 贴库球专项推荐力度压制：避免系统错误推荐过大力量导致晃袋弹飞
+        // 贴库球与半贴库擦角补偿专项推荐力度压制：避免系统错误推荐过大力量导致晃袋弹飞
         const ch = geomPred.target.cushionHug || geomPred.target.pocket?.cushionHug;
         if (ch && ch.isTight) {
           recPower = clamp(recPower, 22, 32);
-        } else if (ch && ch.isNear) {
+        } else if (ch && (ch.isNear || ch.isJawClipping)) {
           recPower = clamp(recPower, 22, 38);
         }
       }
@@ -4742,6 +4912,8 @@
           let hugPrefix = '';
           if (ch && ch.isTight) {
             hugPrefix = `📌贴库(${ch.edgeGap}mm) · `;
+          } else if (ch && ch.isJawClipping) {
+            hugPrefix = `📐擦角补偿(${ch.compOffset}mm) · `;
           } else if (ch && ch.isNear) {
             hugPrefix = `📐半贴库(${ch.edgeGap}mm) · `;
           }
@@ -6012,6 +6184,7 @@
       predictAim: predict,
       readTableBounds,
       checkCushionHug,
+      checkParallelRayJawClipping,
       resolveCompensatedPocketTarget,
       rayRailHit,
       trimPolyline,
