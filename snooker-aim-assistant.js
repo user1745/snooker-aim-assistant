@@ -1587,7 +1587,6 @@
             if (typeof api.subscribe === 'function') {
               api.subscribe((event) => {
                 onCoreRuleEvent(event);
-                SnookerSpy.handleCoreEvent(event);
               });
             }
           } catch (_) {}
@@ -1681,237 +1680,6 @@
     }
     return raw;
   }
-
-  /* ================================================================== */
-  /* 【深度工具】SnookerSpy 游戏物理与函数实时爬虫工具                   */
-  /* ================================================================== */
-
-  function safeClone(obj, depth = 0) {
-    if (!obj || typeof obj !== 'object' || depth > 3) return obj;
-    if (Array.isArray(obj)) return obj.slice(0, 50).map((item) => safeClone(item, depth + 1));
-    const out = {};
-    for (const k of Object.keys(obj)) {
-      if (k.startsWith('_') || typeof obj[k] === 'function') continue;
-      try {
-        out[k] = safeClone(obj[k], depth + 1);
-      } catch (_) {}
-    }
-    return out;
-  }
-
-  function safeCloneState(state) {
-    if (!state) return null;
-    return {
-      cueBallId: state.cueBallId,
-      aim: state.aim ? {
-        direction: state.aim.direction ? { x: +state.aim.direction.x.toFixed(4), y: +state.aim.direction.y.toFixed(4) } : null,
-        power: state.aim.power,
-        tipOffset: state.aim.tipOffset ? { x: +state.aim.tipOffset.x.toFixed(3), y: +state.aim.tipOffset.y.toFixed(3) } : null,
-        verticalAngle: state.aim.verticalAngle,
-      } : null,
-      aimPrediction: state.aimPrediction ? {
-        hit: state.aimPrediction.hit,
-        contactBallId: state.aimPrediction.contactBallId,
-        cueCushionPaths: state.aimPrediction.cueCushionPaths,
-        targetPath: state.aimPrediction.targetPath,
-      } : null,
-      balls: Array.isArray(state.balls) ? state.balls.map((b) => ({
-        id: b.id,
-        kind: b.kind,
-        potted: b.potted,
-        pos: b.pos ? { x: +b.pos.x.toFixed(2), y: +b.pos.y.toFixed(2) } : null,
-      })) : [],
-    };
-  }
-
-  const SnookerSpy = {
-    enabled: false,
-    sessionStart: Date.now(),
-    shots: [],
-    aimSamples: [],
-    interceptedEvents: [],
-    activeShotRecord: null,
-    _lastSampleTime: 0,
-
-    start() {
-      this.enabled = true;
-      this.sessionStart = Date.now();
-      this.updateUI();
-      showToast('🕷 斯诺克数据爬虫已开启，开始记录击球与函数数据', 2000);
-    },
-
-    stop() {
-      this.enabled = false;
-      this.updateUI();
-      showToast('⏸ 斯诺克数据爬虫已暂停', 1500);
-    },
-
-    toggle() {
-      if (this.enabled) this.stop();
-      else this.start();
-    },
-
-    clear() {
-      this.shots = [];
-      this.aimSamples = [];
-      this.interceptedEvents = [];
-      this.activeShotRecord = null;
-      this.updateUI();
-      showToast('🧹 爬虫缓存已清空', 1200);
-    },
-
-    handleCoreEvent(event) {
-      if (!this.enabled || !event) return;
-      const type = event.type || 'unknown';
-      const record = {
-        time: Date.now() - this.sessionStart,
-        type,
-        detail: safeClone(event),
-      };
-      this.interceptedEvents.push(record);
-      if (this.interceptedEvents.length > 200) this.interceptedEvents.shift();
-
-      if (type === 'shot-start') {
-        const state = readState();
-        this.activeShotRecord = {
-          shotId: this.shots.length + 1,
-          startTime: Date.now(),
-          shotParams: event.shot || (state && state.shot) || {},
-          preShotState: safeCloneState(state),
-          events: [],
-          physicsFrames: [],
-        };
-      } else if (type === 'shot-end' || type === 'shot-settled' || type === 'reset') {
-        if (this.activeShotRecord) {
-          const state = readState();
-          this.activeShotRecord.endTime = Date.now();
-          this.activeShotRecord.durationMs = this.activeShotRecord.endTime - this.activeShotRecord.startTime;
-          this.activeShotRecord.postShotState = safeCloneState(state);
-          this.shots.push(this.activeShotRecord);
-          if (this.shots.length > 50) this.shots.shift();
-          this.activeShotRecord = null;
-          this.updateUI();
-        }
-      } else if (this.activeShotRecord) {
-        this.activeShotRecord.events.push(record);
-      }
-    },
-
-    recordAimFrame(state, nativeAp, assistantPred) {
-      if (!this.enabled || !state || !state.aim) return;
-      const now = performance.now();
-      if (now - this._lastSampleTime < 300) return;
-      this._lastSampleTime = now;
-
-      const cue = getCueBall(state);
-      const sample = {
-        timestamp: Date.now(),
-        cuePos: cue && cue.pos ? { x: +cue.pos.x.toFixed(2), y: +cue.pos.y.toFixed(2) } : null,
-        aimDirection: state.aim.direction ? { x: +state.aim.direction.x.toFixed(4), y: +state.aim.direction.y.toFixed(4) } : null,
-        power: state.aim.power,
-        tipOffset: state.aim.tipOffset ? { x: +state.aim.tipOffset.x.toFixed(3), y: +state.aim.tipOffset.y.toFixed(3) } : null,
-        verticalAngle: state.aim.verticalAngle,
-        nativePrediction: nativeAp ? {
-          hit: nativeAp.hit,
-          contactBallId: nativeAp.contactBallId,
-          contact: nativeAp.contact ? {
-            type: nativeAp.contact.type,
-            point: nativeAp.contact.point,
-            normal: nativeAp.contact.normal,
-            cutAngle: nativeAp.contact.cutAngle,
-          } : null,
-          cuePath: nativeAp.cuePath,
-          cueCushionPaths: nativeAp.cueCushionPaths,
-          targetPath: nativeAp.targetPath,
-          cueRollingDirection: nativeAp.cueDirectionPrediction?.cueRollingDirection,
-        } : null,
-        assistantPrediction: assistantPred ? {
-          targetBall: assistantPred.target ? assistantPred.target.ball?.id : null,
-          contact: assistantPred.target?.contact,
-          objectPath: assistantPred.target?.objectPath,
-          cushionRebounds: assistantPred.cuePost?.cueCushionPaths,
-        } : null,
-      };
-
-      this.aimSamples.push(sample);
-      if (this.aimSamples.length > 100) this.aimSamples.shift();
-      this.updateUI();
-    },
-
-    recordMotionFrame(state) {
-      if (!this.enabled || !this.activeShotRecord || !state) return;
-      if (this.activeShotRecord.physicsFrames.length >= 180) return;
-      const cue = getCueBall(state);
-      const frameData = {
-        t: Date.now() - this.activeShotRecord.startTime,
-        cuePos: cue && cue.pos ? { x: +cue.pos.x.toFixed(2), y: +cue.pos.y.toFixed(2) } : null,
-        cueVel: cue && (cue.vel || cue.v) ? { x: +(cue.vel?.x || cue.v?.x || 0).toFixed(2), y: +(cue.vel?.y || cue.v?.y || 0).toFixed(2) } : null,
-      };
-      this.activeShotRecord.physicsFrames.push(frameData);
-    },
-
-    exportJSON() {
-      const data = {
-        appName: '147Master Snooker Telemetry Crawler',
-        exportedAt: new Date().toISOString(),
-        sessionDurationSec: Math.round((Date.now() - this.sessionStart) / 1000),
-        shotCount: this.shots.length,
-        aimSampleCount: this.aimSamples.length,
-        eventCount: this.interceptedEvents.length,
-        shots: this.shots,
-        aimSamples: this.aimSamples,
-        events: this.interceptedEvents,
-      };
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `snooker_spy_data_${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, 500);
-      showToast('💾 爬虫数据已导出为 JSON 文件', 1500);
-    },
-
-    copyLatestShot() {
-      if (!this.shots.length && !this.aimSamples.length) {
-        showToast('暂无抓取数据，请先击球练习', 1500);
-        return;
-      }
-      const latest = this.shots[this.shots.length - 1] || this.aimSamples[this.aimSamples.length - 1];
-      const text = JSON.stringify(latest, null, 2);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-          showToast('📋 最新击球/瞄准数据已复制到剪贴板', 1500);
-        }).catch(() => {
-          prompt('请手动复制以下数据:', text);
-        });
-      } else {
-        prompt('请手动复制以下数据:', text);
-      }
-    },
-
-    updateUI() {
-      const counterEl = document.getElementById('spy-counter');
-      if (counterEl) {
-        counterEl.textContent = `已抓取: ${this.shots.length} 次击球 / ${this.aimSamples.length} 条瞄准`;
-      }
-      const toggleBtn = document.getElementById('spy-toggle-btn');
-      if (toggleBtn) {
-        toggleBtn.textContent = this.enabled ? '⏸ 暂停爬虫' : '▶ 开启爬虫';
-        toggleBtn.style.background = this.enabled ? '#ff4d4f' : '#00ff88';
-        toggleBtn.style.color = this.enabled ? '#ffffff' : '#0b1a11';
-      }
-    },
-  };
-
-  try {
-    window.__snookerSpy__ = SnookerSpy;
-    window.__snookerSpyData__ = SnookerSpy;
-  } catch (_) {}
 
   /* ================================================================== */
   /* 【每日挑战自动化击球】全台自由选球、无阻挡最优下球、死局冲球解围、100%满力出杆 */
@@ -5100,86 +4868,6 @@
       tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
       this.body.appendChild(tipHint);
 
-      // 斯诺克数据与函数抓取爬虫控制卡片
-      const spySection = document.createElement('div');
-      spySection.style.cssText = [
-        'margin: 8px 0 4px 0 !important;',
-        'padding: 8px !important;',
-        'background: rgba(0, 255, 136, 0.08) !important;',
-        'border: 1px solid rgba(0, 255, 136, 0.25) !important;',
-        'border-radius: 6px !important;',
-        'box-sizing: border-box !important;',
-        'width: 100% !important;',
-      ].join(' ');
-
-      const spyHeader = document.createElement('div');
-      spyHeader.style.cssText = 'display: flex !important; justify-content: space-between !important; align-items: center !important; margin-bottom: 4px !important;';
-
-      const spyTitle = document.createElement('span');
-      spyTitle.textContent = '🕷 物理与函数爬虫';
-      spyTitle.style.cssText = 'font-weight: 700 !important; color: #00ff88 !important; font-size: 11px !important;';
-
-      const spyCounter = document.createElement('span');
-      spyCounter.id = 'spy-counter';
-      spyCounter.textContent = '已捕获: 0 次击球';
-      spyCounter.style.cssText = 'color: #a8f0cc !important; font-size: 10px !important;';
-
-      spyHeader.append(spyTitle, spyCounter);
-
-      const spyDesc = document.createElement('div');
-      spyDesc.textContent = '开启后击球练习，后台抓取物理数据与引擎反弹函数比对。';
-      spyDesc.style.cssText = 'font-size: 10px !important; color: #94a3b8 !important; margin-bottom: 6px !important; line-height: 1.3 !important;';
-
-      const spyBtnGrid = document.createElement('div');
-      spyBtnGrid.style.cssText = [
-        'display: grid !important;',
-        'grid-template-columns: 1fr 1fr !important;',
-        'gap: 6px !important;',
-        'width: 100% !important;',
-        'box-sizing: border-box !important;',
-      ].join(' ');
-
-      const createSpyBtn = (text, id, bg, color, onClick) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.id = id;
-        btn.textContent = text;
-        btn.style.cssText = [
-          'width: 100% !important;',
-          'height: 26px !important;',
-          'line-height: 26px !important;',
-          'border: none !important;',
-          'border-radius: 4px !important;',
-          `background: ${bg} !important;`,
-          `color: ${color} !important;`,
-          'font-size: 11px !important;',
-          'font-weight: 600 !important;',
-          'cursor: pointer !important;',
-          'text-align: center !important;',
-          'padding: 0 4px !important;',
-          'box-sizing: border-box !important;',
-          'white-space: nowrap !important;',
-          'overflow: hidden !important;',
-          'text-overflow: ellipsis !important;',
-        ].join(' ');
-        btn.onclick = (e) => {
-          e.stopPropagation();
-          if (performance.now() < this._suppressClickUntil) return;
-          onClick();
-          if (navigator.vibrate) navigator.vibrate(12);
-        };
-        return btn;
-      };
-
-      const spyToggleBtn = createSpyBtn('▶ 开启爬虫', 'spy-toggle-btn', '#00ff88', '#0b1a11', () => SnookerSpy.toggle());
-      const spyExportBtn = createSpyBtn('💾 导出JSON', 'spy-export-btn', 'rgba(255,255,255,0.12)', '#e2ebe0', () => SnookerSpy.exportJSON());
-      const spyCopyBtn = createSpyBtn('📋 复制最新', 'spy-copy-btn', 'rgba(255,255,255,0.12)', '#e2ebe0', () => SnookerSpy.copyLatestShot());
-      const spyClearBtn = createSpyBtn('🧹 清空数据', 'spy-clear-btn', 'rgba(255,255,255,0.08)', '#94a3b8', () => SnookerSpy.clear());
-
-      spyBtnGrid.append(spyToggleBtn, spyExportBtn, spyCopyBtn, spyClearBtn);
-      spySection.append(spyHeader, spyDesc, spyBtnGrid);
-      this.body.appendChild(spySection);
-
       this.debugLine = document.createElement('div');
       this.debugLine.style.cssText = [
         'margin-top: 6px !important;',
@@ -5693,9 +5381,6 @@
         _turnPowerActive = false;
         _turnHasInteracted = false;
         _settledRawPower = null;
-        if (SnookerSpy.enabled) {
-          SnookerSpy.recordMotionFrame(state);
-        }
         if (!_shotHiddenSince) _shotHiddenSince = performance.now();
         const now = performance.now();
         const still = ballsActuallyStill(state);
@@ -5724,9 +5409,6 @@
           _turnHasInteracted = false;
           _settledRawPower = extractRawStatePower(state);
           if (overlay.canvas) overlay.clear();
-          if (SnookerSpy.enabled && SnookerSpy.activeShotRecord) {
-            SnookerSpy.handleCoreEvent({ type: 'shot-settled' });
-          }
         }
         _shotHiddenSince = 0;
       }
@@ -5755,9 +5437,6 @@
 
       const pred = attachShotPowerMetrics(_lastGeomPred, state);
       const didDraw = overlay.drawPrediction(pred);
-      if (SnookerSpy.enabled) {
-        SnookerSpy.recordAimFrame(state, state.aimPrediction, pred);
-      }
       _lastRenderKey = didDraw ? keys.renderKey : null;
       _lastFullPred = pred;
       _lastConfigVersion = _configVersion;
@@ -5798,13 +5477,6 @@
   let _pollCount = 0;
   function pollCoreNamespace() {
     installCoreHook();
-    const tg = getGameGlobal('threeGame');
-    if (tg && tg.core && typeof tg.core.subscribe === 'function' && !tg.core._spySubscribed) {
-      tg.core._spySubscribed = true;
-      try {
-        tg.core.subscribe((event) => SnookerSpy.handleCoreEvent(event));
-      } catch (_) {}
-    }
     _pollCount++;
     if (!capturedCore && !readState() && _pollCount < 60) {
       setTimeout(pollCoreNamespace, _pollCount < 20 ? 50 : 300);
@@ -5878,7 +5550,6 @@
       overlay,
       projection,
       NativeWorkerBridge,
-      SnookerSpy,
       FALLBACK_POCKETS,
     };
   } catch (_) {}
