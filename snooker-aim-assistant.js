@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.6.1
+// @version      1.6.2
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、每日挑战自动化击球(面板专属按钮/全台自由选球/100%满力击球/死局冲球解围/连续清台)、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -1916,40 +1916,61 @@
   /* ================================================================== */
 
   function triggerFullPowerStrike(callback) {
-    // 途径 1: 底层核心控制器 API
     const tg = getGameGlobal('threeGame');
     const sp = getGameGlobal('SnookerProduct');
     const practice = sp && sp.practice;
-    const controllers = [capturedCore, tg && tg.core, practice, sp && sp.core, tg].filter(Boolean);
+    const coreCandidates = [capturedCore, tg && tg.core, practice, sp && sp.core].filter(Boolean);
 
-    for (const ctrl of controllers) {
-      try {
-        if (typeof ctrl.setPower === 'function') {
-          ctrl.setPower(100);
-        }
-        if (typeof ctrl.shoot === 'function') {
-          ctrl.shoot({ power: 100, tip: { x: 0, y: 0 } });
-          break;
-        }
-        if (typeof ctrl.startShot === 'function') {
-          ctrl.startShot({ power: 100, tip: { x: 0, y: 0 } });
-          break;
-        }
-        if (typeof ctrl.strike === 'function') {
-          ctrl.strike(100);
-          break;
-        }
-        if (typeof ctrl.takeShot === 'function') {
-          ctrl.takeShot(100);
-          break;
-        }
-      } catch (_) {}
+    let targetCore = null;
+    for (const c of coreCandidates) {
+      if (c && typeof c.shoot === 'function') {
+        targetCore = c;
+        break;
+      }
     }
 
-    // 途径 2: 模拟力度拉杆手势 (DOM / Canvas 模拟真实拉杆 100% 满力并松手释放)
-    simulatePowerSliderPullAndRelease(() => {
-      if (typeof callback === 'function') callback();
-    });
+    if (targetCore) {
+      // 1. 设置 100% 满力
+      try {
+        if (typeof targetCore.setPower === 'function') {
+          targetCore.setPower(100);
+        }
+      } catch (_) {}
+
+      // 2. 短暂延迟 60ms 确保力度同步到核心状态与球杆姿态，然后以有效数值时间戳调用 shoot() 出杆
+      setTimeout(() => {
+        let shotSuccess = false;
+        try {
+          if (typeof targetCore.setPower === 'function') {
+            targetCore.setPower(100);
+          }
+          // 核心关键修复：
+          // core.shoot(now = performance.now()) 必须接收有效数值时间戳（或不传参使用默认值），
+          // 绝对不能传入对象！若传入对象会导致底层 strokeAnimation 的 startTime 为 NaN，
+          // 进而导致球杆拉满后永远无法到达击打 impactTime 卡死！
+          const res = targetCore.shoot(performance.now());
+          shotSuccess = (res !== false);
+          if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine) {
+            DailyChallengeEngine.lastShotTime = performance.now();
+          }
+        } catch (e) {
+          console.warn('targetCore.shoot 异常:', e);
+        }
+
+        // 3. 若 core.shoot 成功出杆，直接完成
+        if (shotSuccess) {
+          if (typeof callback === 'function') callback(true);
+          return;
+        }
+
+        // 4. 若 core.shoot 未生效，使用手势兜底
+        simulatePowerSliderPullAndRelease(callback);
+      }, 60);
+      return;
+    }
+
+    // 无 core 时的兜底手势
+    simulatePowerSliderPullAndRelease(callback);
   }
 
   function simulatePowerSliderPullAndRelease(done) {
@@ -1957,18 +1978,18 @@
     const win = targetDoc.defaultView || window;
     const canvas = projection.canvas || findGameCanvasInDoc(targetDoc);
 
-    // 寻找潜在的力度条 DOM 或 Canvas 右侧滑杆区域
+    // 寻找潜在的力度条 DOM 或 Canvas 右侧滑杆区域 (#power-track 优先)
     let powerEl = null;
     const selectors = [
+      '#power-track', '[id*="power-track"]', '[class*="power-track"]',
       '[class*="cue-power"]', '[class*="cue_power"]', '[id*="cue-power"]',
-      '[class*="power-bar"]', '[class*="power_bar"]', '[class*="slider"]',
-      '[class*="cue-stick"]', '[id*="power"]', '[class*="power"]'
+      '[class*="power-bar"]', '[class*="power_bar"]', '[id*="power"]'
     ];
     for (const sel of selectors) {
       const el = targetDoc.querySelector(sel);
       if (el && !el.closest('#snooker-aim-panel')) {
         const rect = el.getBoundingClientRect();
-        if (rect.width > 10 && rect.height > 60) {
+        if (rect.width > 8 && rect.height > 40) {
           powerEl = el;
           break;
         }
@@ -1981,7 +2002,7 @@
     if (powerEl) {
       const r = powerEl.getBoundingClientRect();
       startX = r.left + r.width / 2;
-      startY = r.top + r.height * 0.15;
+      startY = r.top + Math.max(8, r.height * 0.1);
       endX = startX;
       endY = r.top + r.height * 0.95;
     } else if (canvas) {
@@ -1994,16 +2015,17 @@
     }
 
     if (!targetNode) {
-      if (done) done();
+      if (done) done(false);
       return;
     }
 
     try {
+      const pointerId = 101;
       const optsDown = {
         bubbles: true, cancelable: true, view: win,
         clientX: startX, clientY: startY,
         screenX: startX, screenY: startY,
-        buttons: 1, button: 0, isPrimary: true, pointerId: 1
+        buttons: 1, button: 0, isPrimary: true, pointerId, pointerType: 'touch',
       };
       targetNode.dispatchEvent(new PointerEvent('pointerdown', optsDown));
       targetNode.dispatchEvent(new MouseEvent('mousedown', optsDown));
@@ -2013,9 +2035,10 @@
           bubbles: true, cancelable: true, view: win,
           clientX: endX, clientY: endY,
           screenX: endX, screenY: endY,
-          buttons: 1, button: 0, isPrimary: true, pointerId: 1
+          buttons: 1, button: 0, isPrimary: true, pointerId, pointerType: 'touch',
         };
         targetNode.dispatchEvent(new PointerEvent('pointermove', optsMove));
+        win.dispatchEvent(new PointerEvent('pointermove', optsMove));
         targetNode.dispatchEvent(new MouseEvent('mousemove', optsMove));
 
         setTimeout(() => {
@@ -2023,15 +2046,24 @@
             bubbles: true, cancelable: true, view: win,
             clientX: endX, clientY: endY,
             screenX: endX, screenY: endY,
-            buttons: 0, button: 0, isPrimary: true, pointerId: 1
+            buttons: 0, button: 0, isPrimary: true, pointerId, pointerType: 'touch',
           };
           targetNode.dispatchEvent(new PointerEvent('pointerup', optsUp));
+          win.dispatchEvent(new PointerEvent('pointerup', optsUp));
           targetNode.dispatchEvent(new MouseEvent('mouseup', optsUp));
-          if (done) done();
+          try {
+            if (typeof targetNode.releasePointerCapture === 'function' && targetNode.hasPointerCapture(pointerId)) {
+              targetNode.releasePointerCapture(pointerId);
+            }
+          } catch (_) {}
+          if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine) {
+            DailyChallengeEngine.lastShotTime = performance.now();
+          }
+          if (done) done(true);
         }, 80);
       }, 50);
     } catch (_) {
-      if (done) done();
+      if (done) done(false);
     }
   }
 
@@ -2231,6 +2263,18 @@
         if (typeof state.aim.angle === 'number') state.aim.angle = nextAngle;
       }
       state.aimPrediction = null;
+    } catch (_) {}
+
+    // 若规则状态要求指定彩球，自动调用 nominate 满足出杆前置规则条件
+    try {
+      const tg = getGameGlobal('threeGame');
+      const sp = getGameGlobal('SnookerProduct');
+      const coreCandidates = [capturedCore, tg && tg.core, sp && sp.practice, sp && sp.core].filter(Boolean);
+      for (const c of coreCandidates) {
+        if (typeof c.nominate === 'function' && state.ruleState?.requiresNomination && bestBall?.kind) {
+          c.nominate(bestBall.kind);
+        }
+      }
     } catch (_) {}
 
     _lastGeomKey = null;
@@ -5749,7 +5793,7 @@
   try {
     window.__snookerAimUi__ = ui;
     window.__snookerAimAssistant__ = {
-      version: '1.6.1',
+      version: '1.6.2',
       CONFIG,
       TOGGLE_KEYS,
       BALL_RADIUS_MM,
