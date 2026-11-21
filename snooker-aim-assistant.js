@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.5
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、母球走位预测线架构重构、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.7.6
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、母球走位预测线架构重构、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.5';
+  const SCRIPT_VERSION = '1.7.6';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -4718,6 +4718,376 @@
     return null;
   }
 
+  /* ================================================================== */
+  /* 点与折线欧氏几何工具函数 (用于真实走位与预测折线距离误差计算)        */
+  /* ================================================================== */
+
+  function distToSegmentSquared(p, v, w) {
+    const l2 = (v.x - w.x) * (v.x - w.x) + (v.y - w.y) * (v.y - w.y);
+    if (l2 === 0) return (p.x - v.x) * (p.x - v.x) + (p.y - v.y) * (p.y - v.y);
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    const projX = v.x + t * (w.x - v.x);
+    const projY = v.y + t * (w.y - v.y);
+    return (p.x - projX) * (p.x - projX) + (p.y - projY) * (p.y - projY);
+  }
+
+  function distPointToPolyline(p, polyline) {
+    if (!p || !Array.isArray(polyline) || polyline.length === 0) return 0;
+    if (polyline.length === 1) return Math.hypot(p.x - polyline[0].x, p.y - polyline[0].y);
+    let minDistSq = Infinity;
+    for (let i = 0; i < polyline.length - 1; i++) {
+      const dSq = distToSegmentSquared(p, polyline[i], polyline[i + 1]);
+      if (dSq < minDistSq) minDistSq = dSq;
+    }
+    return Math.sqrt(minDistSq);
+  }
+
+  /* ================================================================== */
+  /* 真实走位 vs 蓝色落位预测线 录制与对比导出引擎 (v1.7.6)                 */
+  /* ================================================================== */
+
+  const TrajectoryRecorder = {
+    isRecording: false,
+    records: [],
+    activeSession: null,
+
+    toggleRecording() {
+      this.isRecording = !this.isRecording;
+      if (this.isRecording) {
+        showToast('🔴 已开启轨迹录制，击打目标球将自动记录走位', 1800);
+      } else {
+        const count = this.records.length;
+        showToast(`⏹️ 已停止轨迹录制 (当前已存 ${count} 杆数据)`, 1800);
+      }
+      if (ui && typeof ui.updateRecordButtons === 'function') {
+        ui.updateRecordButtons();
+      }
+    },
+
+    onShotStart(state, pred) {
+      if (!this.isRecording) return;
+      if (!pred) return;
+
+      const cueBall = getCueBall(state);
+      const cuePos = extractBallPos(cueBall) || (pred.cue ? { x: pred.cue.x, y: pred.cue.y } : null);
+      if (!cuePos) return;
+
+      const targetBall = pred.target?.ball || null;
+      const targetPos = targetBall ? extractBallPos(targetBall) : null;
+      const targetId = targetBall ? (targetBall.id != null ? String(targetBall.id) : null) : null;
+
+      // 提取蓝色走位预测线的折线点序列
+      const blueLineTrajectory = Array.isArray(pred.cuePostTrajectory)
+        ? pred.cuePostTrajectory.map((p) => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }))
+        : [];
+      const blueRestPos = pred.cueRestPos
+        ? { x: Number(pred.cueRestPos.x.toFixed(2)), y: Number(pred.cueRestPos.y.toFixed(2)) }
+        : (blueLineTrajectory.length > 0 ? blueLineTrajectory[blueLineTrajectory.length - 1] : null);
+
+      // 目标球预测折线
+      const predictedObjectPath = (pred.target && Array.isArray(pred.target.objectPath))
+        ? pred.target.objectPath.map((p) => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }))
+        : [];
+
+      this.activeSession = {
+        shotId: this.records.length + 1,
+        startTimeMs: performance.now(),
+        dateStr: new Date().toISOString(),
+        shotParams: {
+          power: Math.round(Number(pred.shot?.power ?? pred.power ?? 0)),
+          tip: pred.tip ? { x: Number(Number(pred.tip.x || 0).toFixed(3)), y: Number(Number(pred.tip.y || 0).toFixed(3)) } : { x: 0, y: 0 },
+          aimDir: pred.aimDir ? { x: Number(Number(pred.aimDir.x || 0).toFixed(3)), y: Number(Number(pred.aimDir.y || 0).toFixed(3)) } : null,
+          cutAngleDeg: pred.target?.cutAngleDeg != null ? Math.round(pred.target.cutAngleDeg) : null,
+          targetPocket: pred.target?.pocket?.label || null,
+          method: (CONFIG.reboundMethod === 'worker' && pred.cuePost?.method === 'worker') ? 'worker' : 'algo',
+        },
+        predicted: {
+          contactPoint: pred.target?.contact ? { x: Number(pred.target.contact.x.toFixed(2)), y: Number(pred.target.contact.y.toFixed(2)) } : null,
+          cueRestPos: blueRestPos,
+          cuePostTrajectory: blueLineTrajectory,
+          objectPath: predictedObjectPath,
+          targetBall: targetBall ? { id: targetId, kind: kindLabel(targetBall.kind) } : null,
+        },
+        actual: {
+          initialCuePos: { x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) },
+          initialTargetPos: targetPos ? { x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) } : null,
+          cueTotalPath: [{ tMs: 0, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) }],
+          cuePostImpactPath: [], // 碰球后的真实母球走位轨迹点序列
+          targetBallPath: targetPos ? [{ tMs: 0, x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) }] : [],
+          impactOccurred: false,
+          impactTimeMs: null,
+          impactCuePos: null,
+          impactTargetPos: null,
+          finalCueRestPos: null,
+          finalTargetRestPos: null,
+          targetPotted: false,
+        },
+        targetId: targetId,
+      };
+    },
+
+    onFrame(state) {
+      if (!this.isRecording || !this.activeSession) return;
+      const s = this.activeSession;
+      const now = performance.now();
+      const elapsedMs = Math.round(now - s.startTimeMs);
+
+      const cueBall = getCueBall(state);
+      const cuePos = extractBallPos(cueBall);
+      if (cuePos) {
+        const curCue = { tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
+        const lastCue = s.actual.cueTotalPath[s.actual.cueTotalPath.length - 1];
+        if (!lastCue || Math.hypot(curCue.x - lastCue.x, curCue.y - lastCue.y) >= 0.5) {
+          s.actual.cueTotalPath.push(curCue);
+        }
+      }
+
+      // 跟踪目标球
+      let targetBall = null;
+      if (s.targetId != null && Array.isArray(state?.balls)) {
+        targetBall = state.balls.find((b) => b && (String(b.id) === s.targetId));
+      }
+      const targetPos = targetBall ? extractBallPos(targetBall) : null;
+      if (targetPos) {
+        const curTarget = { tMs: elapsedMs, x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) };
+        const lastTarget = s.actual.targetBallPath[s.actual.targetBallPath.length - 1];
+        if (!lastTarget || Math.hypot(curTarget.x - lastTarget.x, curTarget.y - lastTarget.y) >= 0.5) {
+          s.actual.targetBallPath.push(curTarget);
+        }
+      }
+
+      // 检测撞击目标球的瞬间 (Impact Detection)
+      if (!s.actual.impactOccurred && cuePos && targetPos) {
+        const dist = Math.hypot(cuePos.x - targetPos.x, cuePos.y - targetPos.y);
+        const targetInit = s.actual.initialTargetPos;
+        const targetMoved = targetInit ? Math.hypot(targetPos.x - targetInit.x, targetPos.y - targetInit.y) : 0;
+        // 碰撞判据：中心距离达到两球半径 (<= 53.5mm) 或目标球产生位移 (> 1.2mm)
+        if (dist <= (BALL_RADIUS_MM * 2 + 1.2) || targetMoved > 1.2) {
+          s.actual.impactOccurred = true;
+          s.actual.impactTimeMs = elapsedMs;
+          s.actual.impactCuePos = { x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
+          s.actual.impactTargetPos = { x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) };
+          s.actual.cuePostImpactPath.push({ tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) });
+        }
+      } else if (s.actual.impactOccurred && cuePos) {
+        // 撞击发生之后：实时记录击打目标球之后的母球实际走位轨迹点
+        const curCue = { tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
+        const lastPost = s.actual.cuePostImpactPath[s.actual.cuePostImpactPath.length - 1];
+        if (!lastPost || Math.hypot(curCue.x - lastPost.x, curCue.y - lastPost.y) >= 0.5) {
+          s.actual.cuePostImpactPath.push(curCue);
+        }
+      }
+    },
+
+    computeMetrics(session) {
+      const pred = session.predicted;
+      const actual = session.actual;
+
+      // 1. 最终落位距离误差 (mm)
+      let finalRestErrorMm = null;
+      let deltaXMm = null;
+      let deltaYMm = null;
+      if (actual.finalCueRestPos && pred.cueRestPos) {
+        deltaXMm = Number((actual.finalCueRestPos.x - pred.cueRestPos.x).toFixed(2));
+        deltaYMm = Number((actual.finalCueRestPos.y - pred.cueRestPos.y).toFixed(2));
+        finalRestErrorMm = Number(Math.hypot(deltaXMm, deltaYMm).toFixed(2));
+      }
+
+      // 2. 假想球撞击点误差 (mm)
+      let contactPointErrorMm = null;
+      if (actual.impactCuePos && pred.contactPoint) {
+        contactPointErrorMm = Number(Math.hypot(
+          actual.impactCuePos.x - pred.contactPoint.x,
+          actual.impactCuePos.y - pred.contactPoint.y
+        ).toFixed(2));
+      }
+
+      // 3. 走位轨迹与蓝色预测折线离线偏离度 (mm)
+      const postPath = (actual.cuePostImpactPath && actual.cuePostImpactPath.length > 0)
+        ? actual.cuePostImpactPath
+        : actual.cueTotalPath;
+      const blueLine = pred.cuePostTrajectory || [];
+
+      let maxTrajectoryDeviationMm = 0;
+      let meanTrajectoryDeviationMm = 0;
+      if (postPath.length > 0 && blueLine.length >= 2) {
+        let totalDev = 0;
+        let maxDev = 0;
+        for (const pt of postPath) {
+          const dev = distPointToPolyline(pt, blueLine);
+          totalDev += dev;
+          if (dev > maxDev) maxDev = dev;
+        }
+        meanTrajectoryDeviationMm = Number((totalDev / postPath.length).toFixed(2));
+        maxTrajectoryDeviationMm = Number(maxDev.toFixed(2));
+      }
+
+      // 4. 行进总路程对比 (mm)
+      let actualTravelLengthMm = 0;
+      for (let i = 1; i < postPath.length; i++) {
+        actualTravelLengthMm += Math.hypot(postPath[i].x - postPath[i - 1].x, postPath[i].y - postPath[i - 1].y);
+      }
+      actualTravelLengthMm = Number(actualTravelLengthMm.toFixed(1));
+
+      let predictedTravelLengthMm = 0;
+      for (let i = 1; i < blueLine.length; i++) {
+        predictedTravelLengthMm += Math.hypot(blueLine[i].x - blueLine[i - 1].x, blueLine[i].y - blueLine[i - 1].y);
+      }
+      predictedTravelLengthMm = Number(predictedTravelLengthMm.toFixed(1));
+
+      // 5. 综合吻合度等级判定
+      let accuracyRating = '未知';
+      if (Number.isFinite(finalRestErrorMm)) {
+        if (finalRestErrorMm < 15) accuracyRating = '🎯 极高吻合 (<15mm)';
+        else if (finalRestErrorMm < 35) accuracyRating = '🟢 良好吻合 (<35mm)';
+        else if (finalRestErrorMm < 70) accuracyRating = '🟡 中度吻合 (<70mm)';
+        else accuracyRating = '🔴 偏差较大 (≥70mm)';
+      }
+
+      return {
+        finalRestErrorMm,
+        deltaXMm,
+        deltaYMm,
+        contactPointErrorMm,
+        maxTrajectoryDeviationMm,
+        meanTrajectoryDeviationMm,
+        actualTravelLengthMm,
+        predictedTravelLengthMm,
+        travelLengthDiffMm: Number((actualTravelLengthMm - predictedTravelLengthMm).toFixed(1)),
+        accuracyRating,
+      };
+    },
+
+    onShotEnd(state) {
+      if (!this.isRecording || !this.activeSession) return;
+      const s = this.activeSession;
+      this.activeSession = null;
+
+      const cueBall = getCueBall(state);
+      const finalCuePos = extractBallPos(cueBall);
+      if (finalCuePos) {
+        s.actual.finalCueRestPos = { x: Number(finalCuePos.x.toFixed(2)), y: Number(finalCuePos.y.toFixed(2)) };
+      } else if (s.actual.cueTotalPath.length > 0) {
+        const last = s.actual.cueTotalPath[s.actual.cueTotalPath.length - 1];
+        s.actual.finalCueRestPos = { x: last.x, y: last.y };
+      }
+
+      let targetBall = null;
+      if (s.targetId != null && Array.isArray(state?.balls)) {
+        targetBall = state.balls.find((b) => b && (String(b.id) === s.targetId));
+      }
+      if (targetBall) {
+        s.actual.targetPotted = Boolean(targetBall.potted);
+        const tPos = extractBallPos(targetBall);
+        if (tPos) s.actual.finalTargetRestPos = { x: Number(tPos.x.toFixed(2)), y: Number(tPos.y.toFixed(2)) };
+      }
+
+      // 如果未曾触发碰撞判定，以母球与目标球距离最近点兜底切分
+      if (!s.actual.impactOccurred && s.actual.initialTargetPos) {
+        let minDist = Infinity;
+        let bestIdx = 0;
+        const tInit = s.actual.initialTargetPos;
+        for (let i = 0; i < s.actual.cueTotalPath.length; i++) {
+          const pt = s.actual.cueTotalPath[i];
+          const d = Math.hypot(pt.x - tInit.x, pt.y - tInit.y);
+          if (d < minDist) {
+            minDist = d;
+            bestIdx = i;
+          }
+        }
+        if (minDist <= BALL_RADIUS_MM * 2 + 10) {
+          s.actual.impactOccurred = true;
+          s.actual.impactCuePos = { x: s.actual.cueTotalPath[bestIdx].x, y: s.actual.cueTotalPath[bestIdx].y };
+          s.actual.cuePostImpactPath = s.actual.cueTotalPath.slice(bestIdx);
+        }
+      }
+
+      // 确保撞击后轨迹末端包含停球终点
+      if (s.actual.finalCueRestPos && s.actual.cuePostImpactPath.length > 0) {
+        const lastPost = s.actual.cuePostImpactPath[s.actual.cuePostImpactPath.length - 1];
+        if (Math.hypot(lastPost.x - s.actual.finalCueRestPos.x, lastPost.y - s.actual.finalCueRestPos.y) > 0.1) {
+          s.actual.cuePostImpactPath.push({
+            tMs: Math.round(performance.now() - s.startTimeMs),
+            x: s.actual.finalCueRestPos.x,
+            y: s.actual.finalCueRestPos.y,
+          });
+        }
+      }
+
+      // 计算量化对比指标
+      s.comparisonMetrics = this.computeMetrics(s);
+
+      // 归档存入记录列表
+      this.records.push(s);
+
+      // 更新界面按钮状态与调试信息
+      if (ui && typeof ui.updateRecordButtons === 'function') {
+        ui.updateRecordButtons();
+      }
+
+      const err = s.comparisonMetrics?.finalRestErrorMm;
+      const errStr = err != null ? `${err.toFixed(1)}mm` : '未知';
+      showToast(`🎯 已记录第 ${this.records.length} 杆走位 (母球落位误差: ${errStr})`, 2200);
+      console.log(`[SnookerAimAssistant] 击球录制 #${s.shotId} 完成:`, s);
+    },
+
+    exportRecords() {
+      if (this.records.length === 0) {
+        showToast('⚠️ 暂无录制的击球数据，请先击球录制', 1800);
+        return;
+      }
+
+      const errors = this.records.map((r) => r.comparisonMetrics?.finalRestErrorMm).filter(Number.isFinite);
+      const avgError = errors.length ? (errors.reduce((a, b) => a + b, 0) / errors.length) : 0;
+      const maxError = errors.length ? Math.max(...errors) : 0;
+      const minError = errors.length ? Math.min(...errors) : 0;
+
+      const exportData = {
+        title: '斯诺克大师 - 真实轨迹 vs 蓝色走位预测线对比记录',
+        version: SCRIPT_VERSION,
+        exportTime: new Date().toISOString(),
+        totalShots: this.records.length,
+        summary: {
+          averageRestErrorMm: Number(avgError.toFixed(2)),
+          maxRestErrorMm: Number(maxError.toFixed(2)),
+          minRestErrorMm: Number(minError.toFixed(2)),
+        },
+        shots: this.records,
+      };
+
+      try {
+        const jsonStr = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const nowStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.href = url;
+        a.download = `snooker-trajectory-compare-${nowStr}.json`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          a.remove();
+          URL.revokeObjectURL(url);
+        }, 1500);
+
+        showToast(`✅ 成功导出 ${this.records.length} 杆对比记录文件！`, 2500);
+        console.table(this.records.map((r) => ({
+          '杆号': r.shotId,
+          '出杆力度': `${r.shotParams.power}%`,
+          '预测落位(X,Y)': `(${r.predicted.cueRestPos?.x}, ${r.predicted.cueRestPos?.y})`,
+          '实际落位(X,Y)': `(${r.actual.finalCueRestPos?.x}, ${r.actual.finalCueRestPos?.y})`,
+          '落位距离误差': `${r.comparisonMetrics?.finalRestErrorMm?.toFixed(1)}mm`,
+          '走位平均偏差': `${r.comparisonMetrics?.meanTrajectoryDeviationMm?.toFixed(1)}mm`,
+          '评定': r.comparisonMetrics?.accuracyRating || '-',
+        })));
+      } catch (err) {
+        console.error('导出轨迹数据失败:', err);
+        showToast('❌ 导出失败，请检查浏览器权限', 2000);
+      }
+    },
+  };
+
   /**
    * 计算母球瞄准线随母球向前行进的动态裁剪线段：
    * 母球向前滚动时，瞄准线从母球实时球心画到假想球接触点（已走过的后方路径被擦除）；
@@ -5879,6 +6249,122 @@
       this.updateDailyChallengeBtn();
       this.body.appendChild(dailyBtn);
 
+      // 【真实走位 vs 蓝色落位预测线】轨迹对比记录与导出按钮组 (v1.7.6)
+      const recordRow = document.createElement('div');
+      recordRow.id = 'snooker-trajectory-record-group';
+      recordRow.style.cssText = [
+        'display: grid !important;',
+        'grid-template-columns: 1fr 1fr !important;',
+        'gap: 6px !important;',
+        'margin: 0 0 8px 0 !important;',
+        'width: 100% !important;',
+        'box-sizing: border-box !important;',
+      ].join(' ');
+
+      const recordBtn = document.createElement('button');
+      recordBtn.id = 'snooker-record-toggle-btn';
+      recordBtn.type = 'button';
+      this.recordBtn = recordBtn;
+
+      const exportBtn = document.createElement('button');
+      exportBtn.id = 'snooker-record-export-btn';
+      exportBtn.type = 'button';
+      this.exportBtn = exportBtn;
+
+      recordBtn.style.cssText = [
+        'width: 100% !important;',
+        'padding: 7px 4px !important;',
+        'border: 1px solid rgba(0, 255, 136, 0.35) !important;',
+        'border-radius: 6px !important;',
+        'font-size: 11.5px !important;',
+        'font-weight: 700 !important;',
+        'cursor: pointer !important;',
+        'text-align: center !important;',
+        'display: flex !important;',
+        'align-items: center !important;',
+        'justify-content: center !important;',
+        'letter-spacing: 0.3px !important;',
+        'transition: all 0.2s ease !important;',
+        'user-select: none !important;',
+        'white-space: nowrap !important;',
+      ].join(' ');
+
+      exportBtn.style.cssText = [
+        'width: 100% !important;',
+        'padding: 7px 4px !important;',
+        'border: 1px solid rgba(134, 207, 255, 0.45) !important;',
+        'border-radius: 6px !important;',
+        'font-size: 11.5px !important;',
+        'font-weight: 700 !important;',
+        'cursor: pointer !important;',
+        'text-align: center !important;',
+        'display: flex !important;',
+        'align-items: center !important;',
+        'justify-content: center !important;',
+        'letter-spacing: 0.3px !important;',
+        'transition: all 0.2s ease !important;',
+        'user-select: none !important;',
+        'white-space: nowrap !important;',
+      ].join(' ');
+
+      this.updateRecordButtons = () => {
+        if (!this.recordBtn || !this.exportBtn) return;
+        const isRec = Boolean(typeof TrajectoryRecorder !== 'undefined' && TrajectoryRecorder.isRecording);
+        const count = (typeof TrajectoryRecorder !== 'undefined' && Array.isArray(TrajectoryRecorder.records))
+          ? TrajectoryRecorder.records.length
+          : 0;
+
+        if (isRec) {
+          this.recordBtn.textContent = count > 0 ? `⏹️ 停止记录 (${count}杆)` : '⏹️ 停止记录';
+          this.recordBtn.style.background = 'linear-gradient(135deg, #d32f2f 0%, #ff5252 100%)';
+          this.recordBtn.style.color = '#ffffff';
+          this.recordBtn.style.borderColor = 'rgba(255, 82, 82, 0.8)';
+          this.recordBtn.style.boxShadow = '0 0 10px rgba(255, 82, 82, 0.5)';
+        } else {
+          this.recordBtn.textContent = count > 0 ? `⏺️ 开始记录 (${count}杆)` : '⏺️ 开始记录';
+          this.recordBtn.style.background = 'linear-gradient(135deg, #1b382b 0%, #24523b 100%)';
+          this.recordBtn.style.color = '#7df7b0';
+          this.recordBtn.style.borderColor = 'rgba(0, 255, 136, 0.35)';
+          this.recordBtn.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.25)';
+        }
+
+        this.exportBtn.textContent = count > 0 ? `💾 导出记录 (${count}杆)` : '💾 导出记录';
+        if (count > 0) {
+          this.exportBtn.style.background = 'linear-gradient(135deg, #174266 0%, #1f649c 100%)';
+          this.exportBtn.style.color = '#d6f0ff';
+          this.exportBtn.style.borderColor = 'rgba(134, 207, 255, 0.6)';
+          this.exportBtn.style.boxShadow = '0 0 8px rgba(134, 207, 255, 0.35)';
+        } else {
+          this.exportBtn.style.background = 'rgba(25, 45, 65, 0.65)';
+          this.exportBtn.style.color = '#9bb0c4';
+          this.exportBtn.style.borderColor = 'rgba(134, 207, 255, 0.2)';
+          this.exportBtn.style.boxShadow = 'none';
+        }
+      };
+
+      recordBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (typeof TrajectoryRecorder !== 'undefined') {
+          TrajectoryRecorder.toggleRecording();
+        }
+        this.updateRecordButtons();
+      };
+
+      exportBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (typeof TrajectoryRecorder !== 'undefined') {
+          TrajectoryRecorder.exportRecords();
+        }
+        this.updateRecordButtons();
+      };
+
+      this.updateRecordButtons();
+      recordRow.appendChild(recordBtn);
+      recordRow.appendChild(exportBtn);
+      this.body.appendChild(recordRow);
+
       const row = (label, key) => {
         const div = document.createElement('label');
         div.style.cssText = [
@@ -6393,7 +6879,19 @@
       }
       const roomLine = (pred && pred.roomMode && pred.roomMode.label) ? `模式: ${pred.roomMode.label}\n` : '';
       const engLine = `仿真: ${engineSim.status === 'ready' ? `就绪 (${engineSim.simMs}ms/${engineSim.frames}帧)` : (engineSim.status === 'loading' ? '加载中...' : '备轨/未启用')}\n`;
-      return `${roomLine}${powerLine}\n${engLine}投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}`;
+      let recLine = '';
+      if (typeof TrajectoryRecorder !== 'undefined') {
+        const isRec = TrajectoryRecorder.isRecording;
+        const count = TrajectoryRecorder.records.length;
+        if (isRec) {
+          recLine = `\n[🔴 录制中] 已录 ${count} 杆`;
+        } else if (count > 0) {
+          const last = TrajectoryRecorder.records[count - 1];
+          const err = last.comparisonMetrics?.finalRestErrorMm;
+          recLine = `\n[已录 ${count} 杆] 上杆误差: ${err != null ? err.toFixed(1) + 'mm' : '-'}`;
+        }
+      }
+      return `${roomLine}${powerLine}\n${engLine}投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}${recLine}`;
     },
 
     updateDebug(pred, ready, customStatus) {
@@ -6516,6 +7014,9 @@
         hudPill.hide();
         hudPill.destroy();
         cleanAllOrphanHudPills(false);
+        if (typeof TrajectoryRecorder !== 'undefined' && TrajectoryRecorder.activeSession) {
+          TrajectoryRecorder.activeSession = null;
+        }
 
         _lastGeomKey = null;
         _lastGeomPred = null;
@@ -6565,6 +7066,9 @@
           _shotMotionLocked = true;
           resetTargetMotionState();
           resetCueMotionState();
+          if (typeof TrajectoryRecorder !== 'undefined') {
+            TrajectoryRecorder.onShotStart(state, _lastShotPred || _lastFullPred);
+          }
         }
         _turnPowerActive = false;
         _turnHasInteracted = false;
@@ -6575,6 +7079,9 @@
         const autoRecover = (now - _shotHiddenSince > 18000);
 
         if (still) {
+          if (typeof TrajectoryRecorder !== 'undefined') {
+            TrajectoryRecorder.onShotEnd(state);
+          }
           // 全台所有球（包含母球）彻底完全静止！立即解除走位保护锁，彻底销毁上一杆走位预测线，绝无 600ms 滞留延迟
           _shotMotionLocked = false;
           _wasInShot = false;
@@ -6589,6 +7096,9 @@
           // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
           _shotMotionLocked = true;
           if (autoRecover) {
+            if (typeof TrajectoryRecorder !== 'undefined') {
+              TrajectoryRecorder.onShotEnd(state);
+            }
             _shotMotionLocked = false;
             _wasInShot = false;
             _lastShotPred = null;
@@ -6597,6 +7107,9 @@
             resetCueMotionState();
             overlay.clear();
           } else if (!forceShow) {
+            if (typeof TrajectoryRecorder !== 'undefined') {
+              TrajectoryRecorder.onFrame(state);
+            }
             // 出杆击球走位中：母球走位预测线持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
             const predToDraw = _lastShotPred || _lastFullPred;
             if (predToDraw) {
@@ -6620,6 +7133,9 @@
         }
       } else {
         if (_wasInShot) {
+          if (typeof TrajectoryRecorder !== 'undefined') {
+            TrajectoryRecorder.onShotEnd(state);
+          }
           _wasInShot = false;
           _shotMotionLocked = false;
           _lastShotPred = null;
