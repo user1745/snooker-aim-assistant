@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.4
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、母球走位预测线架构重构、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.7.5
+// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、母球走位预测线架构重构、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.4';
+  const SCRIPT_VERSION = '1.7.5';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -391,26 +391,61 @@
     try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) pushWin(unsafeWindow); } catch (_) {}
     pushWin(window);
 
-    if (window === window.top) {
-      const walkFrames = (win, depth) => {
-        if (!win || depth > 4) return;
-        let frames = null;
-        try { frames = win.frames; } catch (_) { return; }
-        if (!frames || typeof frames.length !== 'number') return;
-        for (let i = 0; i < frames.length; i++) {
-          const child = frames[i];
-          try {
-            if (child && child.document) {
-              pushWin(child);
-              walkFrames(child, depth + 1);
-            }
-          } catch (_) {}
+    let root = window;
+    try {
+      while (root.parent && root.parent !== root) {
+        if (root.parent.document) {
+          root = root.parent;
+          pushWin(root);
+        } else {
+          break;
         }
-      };
-      walkFrames(window, 0);
-    }
+      }
+    } catch (_) {}
+    try {
+      if (window.top && window.top !== root) {
+        pushWin(window.top);
+        root = window.top;
+      }
+    } catch (_) {}
+
+    const walkFrames = (win, depth) => {
+      if (!win || depth > 5) return;
+      let frames = null;
+      try { frames = win.frames; } catch (_) { return; }
+      if (!frames || typeof frames.length !== 'number') return;
+      for (let i = 0; i < frames.length; i++) {
+        const child = frames[i];
+        try {
+          if (child && child.document) {
+            pushWin(child);
+            walkFrames(child, depth + 1);
+          }
+        } catch (_) {}
+      }
+    };
+    try { walkFrames(root, 0); } catch (_) {}
 
     return list;
+  }
+
+  /**
+   * 全局穿透式清理所有候选窗口中的孤立信息浮标 (HUD Pill)
+   * @param {boolean} keepActive - 是否保留当前活跃的 hudPill.el
+   */
+  function cleanAllOrphanHudPills(keepActive = true) {
+    const wins = collectCandidateWindows();
+    for (const win of wins) {
+      try {
+        if (!win || !win.document) continue;
+        const pills = win.document.querySelectorAll('#snooker-aim-hud-pill');
+        for (const el of pills) {
+          if (!keepActive || (typeof hudPill !== 'undefined' && el !== hudPill.el)) {
+            el.remove();
+          }
+        }
+      } catch (_) {}
+    }
   }
 
   /* ================================================================== */
@@ -1200,20 +1235,28 @@
     // 1. 检查大厅主菜单
     if (isLobbyMenuVisible()) {
       if (overlay && overlay.canvas) overlay.clear();
+      if (typeof hudPill !== 'undefined') hudPill.hide();
       return true;
     }
 
     // 2. 检查结算弹窗与加载过渡
     if (isSettlementOrGameOverScreen(state) || isLoadingScreen(state)) {
       if (overlay && overlay.canvas) overlay.clear();
+      if (typeof hudPill !== 'undefined') hudPill.hide();
       return true;
     }
 
     // 3. 状态变量标记检测
     if (state) {
-      if (state.isLobby === true || state.inLobby === true) return true;
+      if (state.isLobby === true || state.inLobby === true) {
+        if (typeof hudPill !== 'undefined') hudPill.hide();
+        return true;
+      }
       const statusLow = String(state.status || state.state || state.phase || '').toLowerCase();
-      if (statusLow.includes('lobby') || statusLow.includes('menu') || statusLow.includes('home')) return true;
+      if (statusLow.includes('lobby') || statusLow.includes('menu') || statusLow.includes('home')) {
+        if (typeof hudPill !== 'undefined') hudPill.hide();
+        return true;
+      }
     }
 
     return false;
@@ -1587,8 +1630,13 @@
     if (event.type === 'frame-over' || event.type === 'game-over' || res.frameOver || res.matchOver || res.gameOver || res.isOver) {
       _frameOrMatchOver = true;
       // 击球走位中暂缓清空画布，等待母球和台面完全停稳
-      if (!_shotMotionLocked && overlay && overlay.canvas) {
-        overlay.clear();
+      if (!_shotMotionLocked) {
+        if (overlay && overlay.canvas) overlay.clear();
+        if (typeof hudPill !== 'undefined') {
+          hudPill.hide();
+          hudPill.destroy();
+        }
+        cleanAllOrphanHudPills(false);
       }
       return;
     }
@@ -1607,7 +1655,7 @@
           _frameOrMatchOver = false;
           NativeWorkerBridge.enableReboundInCore(api);
 
-          // 劫持生命周期销毁与清理 (退出房间时立即切断残留数据并清空画布)
+          // 劫持生命周期销毁与清理 (退出房间时立即切断残留数据并清空画布与信息浮标)
           const origDestroy = api.destroy;
           if (typeof origDestroy === 'function') {
             api.destroy = function (...dArgs) {
@@ -1615,6 +1663,11 @@
                 capturedCore = null;
               }
               if (overlay && overlay.canvas) overlay.clear();
+              if (typeof hudPill !== 'undefined') {
+                hudPill.hide();
+                hudPill.destroy();
+              }
+              cleanAllOrphanHudPills(false);
               return origDestroy.apply(this, dArgs);
             };
           }
@@ -1625,6 +1678,11 @@
                 capturedCore = null;
               }
               if (overlay && overlay.canvas) overlay.clear();
+              if (typeof hudPill !== 'undefined') {
+                hudPill.hide();
+                hudPill.destroy();
+              }
+              cleanAllOrphanHudPills(false);
               return origDispose.apply(this, dArgs);
             };
           }
@@ -2393,6 +2451,9 @@
       if (ui && typeof ui.updateDailyChallengeBtn === 'function') {
         ui.updateDailyChallengeBtn();
       }
+      if (typeof hudPill !== 'undefined') {
+        hudPill.hide();
+      }
       if (reason) {
         showToast(reason, 1500);
       }
@@ -2756,6 +2817,9 @@
       try {
         if (win !== window && win.document) {
           win.document.querySelectorAll('#snooker-aim-panel, #snooker-mobile-dock').forEach((el) => el.remove());
+          win.document.querySelectorAll('#snooker-aim-hud-pill').forEach((el) => {
+            if (typeof hudPill === 'undefined' || el !== hudPill.el) el.remove();
+          });
         }
       } catch (_) {}
       let frames = null;
@@ -4502,10 +4566,14 @@
         return;
       }
 
-      // 移除残留旧节点保障绝对单例
-      try {
-        targetDoc.querySelectorAll('#snooker-aim-hud-pill').forEach((e) => e.remove());
-      } catch (_) {}
+      // 若旧节点存在于不同文档或已失效，先彻底从 DOM 移除
+      if (this.el) {
+        try { this.el.remove(); } catch (_) {}
+        this.el = null;
+      }
+
+      // 全局穿透清除所有跨窗口、跨 iframe 残留的孤立浮标节点，保障整个标签页绝对单例
+      cleanAllOrphanHudPills(false);
 
       const el = targetDoc.createElement('div');
       el.id = 'snooker-aim-hud-pill';
@@ -4598,10 +4666,13 @@
     },
 
     hide() {
-      if (!this.el || !this._visible) return;
-      this.el.style.opacity = '0';
-      this.el.style.display = 'none';
+      if (this.el) {
+        this.el.style.opacity = '0';
+        this.el.style.display = 'none';
+      }
       this._visible = false;
+      this._lastText = '';
+      this._lastColor = '';
     },
 
     destroy() {
@@ -4612,11 +4683,14 @@
       this.dotEl = null;
       this.textEl = null;
       this._visible = false;
+      this._lastText = '';
+      this._lastColor = '';
+      cleanAllOrphanHudPills(false);
     }
   };
 
   /* ================================================================== */
-  /* 击球走位动态擦除与几何裁剪辅助算法 (v1.7.4)                           */
+  /* 击球走位动态擦除与几何裁剪辅助算法 (v1.7.5)                           */
   /* ================================================================== */
 
   let _cueLineCompleted = false;
@@ -6364,12 +6438,8 @@
       }
     }
 
-    const pills = targetDoc.querySelectorAll('#snooker-aim-hud-pill');
-    if (pills.length > 1 && hudPill.el) {
-      for (const el of pills) {
-        if (el !== hudPill.el) el.remove();
-      }
-    }
+    // 全局穿透式信息浮标单例清理：清除所有 candidate windows 下任何非当前活跃 hudPill.el 的幽灵浮标
+    cleanAllOrphanHudPills(true);
   }
 
   function scheduleNextFrame(idle) {
@@ -6426,6 +6496,14 @@
       const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
+
+      // 核心防护 (v1.7.5)：若已离开可玩台面进入大厅、结算或未检测到有效画布，强制解除击球走位锁
+      if (inLobby || isSettlement || !hasCanvas) {
+        _shotMotionLocked = false;
+        _wasInShot = false;
+        _lastShotPred = null;
+      }
+
       const state = (hasCanvas && (!inLobbyOrSettlementOrLoading || _shotMotionLocked)) ? rawState : null;
 
       if ((!hasCanvas || !state || inLobbyOrSettlementOrLoading) && !_shotMotionLocked) {
@@ -6434,6 +6512,11 @@
           overlay.clear();
           if (!hasCanvas) overlay.destroy();
         }
+        // 核心修复 (v1.7.5)：离开球桌、处于大厅或结算时，立即隐藏并销毁信息浮标，彻底清除跨文档幽灵浮标
+        hudPill.hide();
+        hudPill.destroy();
+        cleanAllOrphanHudPills(false);
+
         _lastGeomKey = null;
         _lastGeomPred = null;
         _lastRenderKey = null;
