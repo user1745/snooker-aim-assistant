@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.11
+// @version      1.7.13
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.11';
+  const SCRIPT_VERSION = '1.7.13';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -45,7 +45,8 @@
 
     // 【母球吃库反弹折线】：天蓝色 #86cfff 实线，粗细 1.6px (与绿色瞄准线一致)
     showCushionRebound: true,
-    reboundMethod: 'worker',           // 'worker' (途径1: 拦截Worker数据) | 'algo' (途径2: 算法无缝移植)
+    reboundMethod: 'native-local',     // 'worker'(途径1) | 'native-local'(官方内核算，可超400mm) | 'algo'(途径2)
+    reboundMaxPathMm: 800,             // native-local 反弹折线最大长度（官方原始截断为 400mm）
     cueCushionReboundColor: '#86cfff', // 游戏原生新手天蓝色反弹线 #86cfff
     cueCushionReboundWidthPx: 1.6,     // 与绿色瞄准线 1.6px 完全一致
     showObjectRebound: true,           // 目标球吃库反弹折线
@@ -154,8 +155,17 @@
           _configVersion++;
         }
       }
-      if (typeof saved.reboundMethod === 'string' && (saved.reboundMethod === 'worker' || saved.reboundMethod === 'algo')) {
+      if (typeof saved.reboundMethod === 'string' &&
+          (saved.reboundMethod === 'worker' || saved.reboundMethod === 'algo' || saved.reboundMethod === 'native-local')) {
         CONFIG.reboundMethod = saved.reboundMethod;
+      }
+      // 老存档迁移：v1.7.11 及以前只存过 worker/algo，没有 reboundMaxPathMm；
+      // 升级到 native-local 后默认启用官方内核复算（用户仍可在配置里改回 worker/algo）
+      if (saved.reboundMethod === 'worker' && !Number.isFinite(Number(saved.reboundMaxPathMm))) {
+        CONFIG.reboundMethod = 'native-local';
+      }
+      if (Number.isFinite(Number(saved.reboundMaxPathMm))) {
+        CONFIG.reboundMaxPathMm = Math.max(400, Math.round(Number(saved.reboundMaxPathMm)));
       }
     } catch (_) {}
     if (!_storageListenerInstalled && typeof window !== 'undefined') {
@@ -171,6 +181,7 @@
       const obj = {};
       for (const key of TOGGLE_KEYS) obj[key] = CONFIG[key];
       obj.reboundMethod = CONFIG.reboundMethod;
+      obj.reboundMaxPathMm = CONFIG.reboundMaxPathMm;
       localStorage.setItem(CONFIG.togglesKey, JSON.stringify(obj));
     } catch (_) {}
     _configVersion++;
@@ -569,6 +580,11 @@
     payloadFactory: null,
     simMs: 0,
     frames: 0,
+    _nativePred: null,
+    _nativePredMm: 0,
+    _nativeMod: null,
+    _nativeCacheKey: '',
+    _nativeCacheResult: null,
 
     bundleUrl() {
       const cfg = (typeof window !== 'undefined' && window.SnookerLocalLiteConfig) || null;
@@ -865,6 +881,74 @@
         simMs: this.simMs,
         frames: frames.length,
       };
+    },
+
+    // 【官方内核反弹复算 native-local】
+    // 直接调用本地 game-core 包里的 module 67 (createReboundInput + predictRebound)，
+    // 把官方函数里硬编码的 400mm 截断替换成 CONFIG.reboundMaxPathMm，
+    // 物理仍由 module 68 的 startShot/stepShot 驱动，不改动页面上的官方函数。
+    nativePredictor(maxMm) {
+      const mm = Math.max(400, Math.round(Number(maxMm) || 400));
+      if (this._nativePred && this._nativePredMm === mm) return this._nativePred;
+      if (!this.loadModule) return null;
+      let mod = null;
+      let runtime = null;
+      try {
+        mod = this.loadModule(67);
+        runtime = this.loadModule(68);
+      } catch (_) {}
+      if (!mod || typeof mod.predictRebound !== 'function' || typeof mod.createReboundInput !== 'function') return null;
+      if (!runtime || typeof runtime.startShot !== 'function') return null;
+      let src = '';
+      try { src = String(mod.predictRebound); } catch (_) { return null; }
+      if (src.indexOf('400') < 0) return null;
+      let fn = null;
+      try {
+        const patched = src.replace(/\b400\b/g, 'MAX_MM');
+        fn = new Function(
+          'Runtime', 'point', 'matchesExpectedCushion', 'MAX_MM',
+          '"use strict"; return (' + patched + ');'
+        )(
+          runtime,
+          (p) => ({ x: p.x, y: p.y }),
+          (payload, event) => !payload || !payload.expectedColliderId || (event && event.colliderId === payload.expectedColliderId),
+          mm
+        );
+      } catch (_) {
+        fn = null;
+      }
+      if (!fn) return null;
+      this._nativePred = fn;
+      this._nativePredMm = mm;
+      this._nativeMod = mod;
+      return fn;
+    },
+
+    nativeRebound(payload, maxMm, cacheKey) {
+      if (!payload) return null;
+      const mm = Math.max(400, Math.round(Number(maxMm) || 400));
+      const ck = (cacheKey ? String(cacheKey) : '') + '|' + mm;
+      if (cacheKey && this._nativeCacheKey === ck && this._nativeCacheResult) {
+        return this._nativeCacheResult;
+      }
+      if (this.status === 'idle') this.load();
+      if (this.status !== 'ready') return null;
+      const pred = this.nativePredictor(mm);
+      const mod = this._nativeMod;
+      if (!pred || !mod) return null;
+      try {
+        const input = mod.createReboundInput(payload, {});
+        const res = pred(input.payload || input);
+        if (!res || !res.hit || !Array.isArray(res.path) || res.path.length < 2) return null;
+        if (cacheKey) {
+          this._nativeCacheKey = ck;
+          this._nativeCacheResult = res;
+        }
+        return res;
+      } catch (err) {
+        devLog('warn', '[反弹] native-local 复算失败', err);
+        return null;
+      }
     },
 
     get(key, factory, contextInfo = null) {
@@ -5043,7 +5127,45 @@
       const railHit = rayRailHit(cue.pos, d, boundX, boundY, pockets);
       const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
 
-      if (CONFIG.reboundMethod === 'worker') {
+      // 【途径1.5 native-local】直接跑本地官方内核 predictRebound，长度可超过官方 400mm
+      const useNativeLocal = CONFIG.reboundMethod === 'native-local';
+      let nativeReb = null;
+      if (useNativeLocal && effPower > 0) {
+        try {
+          const rbPayload = engineSim.buildPayload(state, {
+            direction: d,
+            power: effPower,
+            tip,
+            verticalAngle: vertAngle,
+          });
+          const rbKey = [
+            Math.round(effPower * 10),
+            Math.round(d.x * 1000),
+            Math.round(d.y * 1000),
+            Math.round(cue.pos.x),
+            Math.round(cue.pos.y),
+            Math.round(vertAngle * 10),
+            allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
+          ].join('|');
+          nativeReb = engineSim.nativeRebound(rbPayload, CONFIG.reboundMaxPathMm, rbKey);
+        } catch (err) {
+          devLog('warn', '[反弹] native-local 调用异常', err);
+        }
+      }
+      if (nativeReb) {
+        result.noTargetEnd = nativeReb.path[0];
+        result.cuePost = {
+          cueCushionPaths: [ nativeReb.path ],
+          restPos: nativeReb.path[nativeReb.path.length - 1],
+          nativeWorker: false,
+          nativeLocal: true,
+          travelledMm: nativeReb.travelledMm,
+          method: 'native-local',
+        };
+        return result;
+      }
+
+      if (CONFIG.reboundMethod === 'worker' || useNativeLocal) {
         const nReb = NativeWorkerBridge.latestRebound;
         const now = performance.now();
         const inDir = (nReb && nReb.incomingDirection) ? V.norm(nReb.incomingDirection) : null;
@@ -7042,9 +7164,12 @@
             (effPower > 0 && pred.cuePottedWarning) ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
           );
         } else if (pred.noTargetEnd) {
-          const methodLabel = (CONFIG.reboundMethod === 'worker' && pred.cuePost?.method === 'worker')
-            ? '途径1:拦截'
-            : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植');
+          const actualMethod = pred.cuePost && pred.cuePost.method;
+          const methodLabel = actualMethod === 'native-local'
+            ? '途径3:内核'
+            : (actualMethod === 'worker'
+              ? '途径1:拦截'
+              : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植'));
           const cushionName = pred.railHit ? getCushionLabel(pred.railHit.axis, pred.railHit.point) : '库边';
           this.drawTopHudPill(
             `直吃${cushionName} (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
@@ -7801,39 +7926,39 @@
 
       const opt1 = document.createElement('button');
       opt1.type = 'button';
-      opt1.textContent = '途径1: 拦截数据';
-      opt1.title = '途径1: 拦截游戏原生Worker计算数据 (高拟真原生)';
+      opt1.textContent = '① 拦截';
+      opt1.title = '途径1: 拦截游戏原生Worker计算数据 (高拟真原生，官方截断 400mm)';
 
       const opt2 = document.createElement('button');
       opt2.type = 'button';
-      opt2.textContent = '途径2: 算法移植';
-      opt2.title = '途径2: 无缝移植原生V3动力学模型 (即时零延迟)';
+      opt2.textContent = '② 算法';
+      opt2.title = '途径2: 无缝移植原生V3动力学模型 (即时零延迟，400mm后为手写近似)';
+
+      const opt3 = document.createElement('button');
+      opt3.type = 'button';
+      opt3.textContent = '③ 内核';
+      opt3.title = '途径3: 本地加载官方 predictRebound + startShot/stepShot 复算，可超过 400mm';
+
+      const applySegStyle = (el, active) => {
+        el.style.cssText = [
+          'border: none !important;',
+          'border-radius: 3px !important;',
+          'padding: 2px 6px !important;',
+          'font-size: 10.5px !important;',
+          `font-weight: ${active ? '700' : '400'} !important;`,
+          'cursor: pointer !important;',
+          `background: ${active ? '#86cfff' : 'transparent'} !important;`,
+          `color: ${active ? '#081726' : '#9bb0a5'} !important;`,
+          'transition: all 0.15s ease !important;',
+          'white-space: nowrap !important;',
+        ].join(' ');
+      };
 
       const updateSegUI = () => {
-        const isWorker = CONFIG.reboundMethod === 'worker';
-        opt1.style.cssText = [
-          'border: none !important;',
-          'border-radius: 3px !important;',
-          'padding: 2px 7px !important;',
-          'font-size: 10.5px !important;',
-          `font-weight: ${isWorker ? '700' : '400'} !important;`,
-          'cursor: pointer !important;',
-          `background: ${isWorker ? '#86cfff' : 'transparent'} !important;`,
-          `color: ${isWorker ? '#081726' : '#9bb0a5'} !important;`,
-          'transition: all 0.15s ease !important;',
-        ].join(' ');
-
-        opt2.style.cssText = [
-          'border: none !important;',
-          'border-radius: 3px !important;',
-          'padding: 2px 7px !important;',
-          'font-size: 10.5px !important;',
-          `font-weight: ${!isWorker ? '700' : '400'} !important;`,
-          'cursor: pointer !important;',
-          `background: ${!isWorker ? '#86cfff' : 'transparent'} !important;`,
-          `color: ${!isWorker ? '#081726' : '#9bb0a5'} !important;`,
-          'transition: all 0.15s ease !important;',
-        ].join(' ');
+        const m = CONFIG.reboundMethod;
+        applySegStyle(opt1, m === 'worker');
+        applySegStyle(opt2, m === 'algo');
+        applySegStyle(opt3, m === 'native-local');
       };
 
       opt1.onclick = (e) => {
@@ -7852,9 +7977,17 @@
         updateSegUI();
         showToast('已切换至【途径2: 移植V3动力学算法】', 1200);
       };
+      opt3.onclick = (e) => {
+        e.stopPropagation();
+        if (performance.now() < this._suppressClickUntil) return;
+        CONFIG.reboundMethod = 'native-local';
+        saveToggles();
+        updateSegUI();
+        showToast('已切换至【途径3: 本地官方内核复算（可超400mm）】', 1200);
+      };
 
       updateSegUI();
-      segBox.append(opt1, opt2);
+      segBox.append(opt1, opt2, opt3);
       methodRow.append(methodLabel, segBox);
       this.body.appendChild(methodRow);
 
