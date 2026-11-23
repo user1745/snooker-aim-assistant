@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.10
+// @version      1.7.11
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.10';
+  const SCRIPT_VERSION = '1.7.11';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -49,7 +49,7 @@
     cueCushionReboundColor: '#86cfff', // 游戏原生新手天蓝色反弹线 #86cfff
     cueCushionReboundWidthPx: 1.6,     // 与绿色瞄准线 1.6px 完全一致
     showObjectRebound: true,           // 目标球吃库反弹折线
-    maxRebounds: 1,
+    showRecPower: true,                // HUD 推荐力度「需X%，当前Y%」
     ghostCueBallColor: 'rgba(134, 207, 255, 0.35)',
 
     // 默认开启，无需在控制面板中展示
@@ -78,9 +78,9 @@
     cueSpinEfficiency: 0.70,
     tipDeadzone: 0.02,
     clothSlidingMu: 0.18,
-    clothRollingDecelMmS2: 110,
+    clothRollingDecelMmS2: 125,
     clothSideSpinDecelRadS2: 16,
-    railRestitution: 0.98,
+    railRestitution: 0.91,
     cushionContactFrictionMu: 0.18,
     jawRestitution: 0.84,
     ballRestitution: 0.95,
@@ -97,8 +97,9 @@
     panelCollapseKey: 'snooker-aim-assistant-collapse-v1',
     panelCircleHiddenKey: 'snooker-aim-assistant-circle-hidden-v1',
 
-    /* 【每日挑战全自动连打 v1.7.10】
-       进房即自动开局（免点击按钮）→ 清台自动领取 → 自动进入下一关 → 打满 8 关自动停止 */
+    /* 【每日挑战全自动连打 v1.7.11】
+       进房即自动开局（免点击按钮）→ 清台自动领取 → 自动进入下一关 → 打完今日全部关卡自动停止
+       支持跳过反复清不掉的关卡（保留未完成）、跨天自动重置、串行领取防丢单 */
     dailyAuto: {
       enabled: true,                 // 总开关
       autoStart: true,               // 进入每日挑战房后自动开始击球
@@ -637,7 +638,10 @@
       const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
       const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
       const coreConfig = (core && (typeof core.getConfig === 'function' ? core.getConfig() : core.config)) || {};
-      const ph = (cfg && cfg.physics) || (coreConfig && coreConfig.physics) || {};
+      const cfgPh = (cfg && cfg.physics) || {};
+      const corePh = (coreConfig && coreConfig.physics) || {};
+      const cfgHas = Object.keys(cfgPh.overrides || {}).length > 0 || Object.keys(cfgPh.settings || {}).length > 0;
+      const ph = cfgHas ? cfgPh : (corePh || {});
       const settings = ph.settings || {};
       const ov = ph.overrides || {};
       const hasConfig = Object.keys(ov).length > 0 || Object.keys(settings).length > 0;
@@ -646,8 +650,8 @@
       const isV3 = settings.physicsEngine !== 'v2' && settings.physicsEngine !== 'legacy';
       // 强制严格 V3 物理参数基线：绝不回落到旧版 7800 / 60 导致落位成倍超出的常数
       const baseOverrides = {
-        clothRollingDecelMmS2: 110,
-        tableSlidingAccel: 1765.8,
+        clothRollingDecelMmS2: 125,
+        tableSlidingAccel: 1667.7,
         maxCuePower: 7000,
         ...ov,
       };
@@ -2548,7 +2552,7 @@
   };
 
   /* ================================================================== */
-  /* 【每日挑战全自动连打 v1.7.10】                                        */
+  /* 【每日挑战全自动连打 v1.7.11】                                        */
   /* 入口埋点 → 进房免点击自动开局 → 清台自动领取 → 自动下一关 → 8/8     */
   /* ================================================================== */
 
@@ -2664,7 +2668,7 @@
     if (!entry || !entry.id) return null;
     const now = performance.now();
     const cacheKey = shape + '|' + entry.id + '|' + entry.ts;
-    if (_dailyRoomCacheKey === cacheKey && now - _dailyRoomCacheTime < 400) {
+    if (_dailyRoomCacheKey === cacheKey && now - _dailyRoomCacheTime < 1500) {
       return _dailyRoomCacheValue;
     }
     _dailyRoomCacheKey = cacheKey;
@@ -2726,6 +2730,15 @@
     _lobbyTimer: null,
     _lastList: null,
     _navTimer: null,
+    day: '',
+    _lastListAt: 0,
+    _skipped: {},
+    _startBusy: false,
+    _silentQueue: [],
+    _silentBusy: false,
+    _silentTries: {},
+    _claimKeys: {},
+    lastCtx: null,
 
     init() {
       const saved = readDailyRunState();
@@ -2735,11 +2748,44 @@
         this.nextId = saved.nextId || null;
         this.enteredAt = Number(saved.enteredAt) || 0;
         this.levelsDone = Number(saved.levelsDone) || 0;
+        this.day = String(saved.day || '');
+        this._skipped = {};
+        if (Array.isArray(saved.skipped)) {
+          saved.skipped.forEach((id) => { if (id) this._skipped[id] = true; });
+        }
         if (this.phase === 'advancing' && !this.nextId) this.phase = 'idle';
         if (this.phase === 'claiming') this.clearAt = Date.now();
+        // 跨天：本地日期与存档不一致时整段重置，避免第二天仍显示“今日已完成”
+        const today = this.localDay();
+        if (today && this.day && this.day !== today) {
+          this.phase = 'idle';
+          this.currentId = null;
+          this.nextId = null;
+          this.levelsDone = 0;
+          this.enteredAt = 0;
+          this._skipped = {};
+          this._claimKeys = {};
+          this._silentTries = {};
+          this.day = '';
+          this.save();
+        }
       }
       this.startLobbyDriver();
       devLog('info', '[每日挑战] Runner 初始化', this.phase, this.currentId || '-');
+      // 后台校正一次按钮文案/进度（服务端可能已跨天）
+      try {
+        Promise.resolve(this.loadActivities()).then(() => this.updatePanel()).catch(() => {});
+      } catch (_) {}
+    },
+
+    localDay() {
+      try {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      } catch (_) {
+        return '';
+      }
     },
 
     save() {
@@ -2749,8 +2795,16 @@
         nextId: this.nextId,
         enteredAt: this.enteredAt,
         levelsDone: this.levelsDone,
+        day: this.day || '',
+        skipped: Object.keys(this._skipped || {}),
         ts: Date.now(),
       });
+    },
+
+    totalCount(list) {
+      if (list && list.length) return list.length;
+      if (this._lastList && this._lastList.length) return this._lastList.length;
+      return Math.max(1, Number(CONFIG.dailyAuto.totalLevels) || 8);
     },
 
     isBusy() {
@@ -2761,10 +2815,12 @@
     },
 
     progressText() {
-      const total = Math.max(1, Number(CONFIG.dailyAuto.totalLevels) || 8);
+      const total = this.totalCount(this._lastList);
       let done = Number(this.levelsDone) || 0;
       try {
-        const list = getDailyChallengeList();
+        const list = (this._lastList && Date.now() - this._lastListAt < 10000)
+          ? this._lastList
+          : getDailyChallengeList();
         if (list && list.length) done = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
       } catch (_) {}
       return done + '/' + total;
@@ -2777,28 +2833,74 @@
     },
 
     notify(text, tone, ms) {
+      const t = tone || 'info';
       try {
         if (typeof ui !== 'undefined' && ui && typeof ui.showDailyMessage === 'function') {
-          ui.showDailyMessage(text, tone || 'info', ms === undefined ? 4000 : ms);
+          ui.showDailyMessage(text, t, ms === undefined ? 4000 : ms);
         }
       } catch (_) {}
+      if (t === 'warn' || t === 'error') {
+        try { showToast(text, t === 'error' ? 3200 : 2600); } catch (_) {}
+      }
+    },
+
+    async fetchActivitiesOnce(timeoutMs) {
+      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      let timer = null;
+      if (ctrl) {
+        timer = setTimeout(() => {
+          try { ctrl.abort(); } catch (_) {}
+        }, timeoutMs);
+      }
+      try {
+        const res = await fetch('/api/product/activities', {
+          credentials: 'include',
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+        if (!res || !res.ok) return null;
+        return await res.json();
+      } catch (_) {
+        return null;
+      } finally {
+        if (timer) { clearTimeout(timer); timer = null; }
+      }
+    },
+
+    applyActivities(data) {
+      const list = data && Array.isArray(data.challenges) ? data.challenges : null;
+      if (!list) return null;
+      const prevDay = this.day;
+      if (data.day && prevDay && String(data.day) !== prevDay) {
+        // 跨天：清空跳过名单/领取 key，避免把昨天状态带到今天
+        this._skipped = {};
+        this._claimKeys = {};
+        this._silentTries = {};
+        this._silentQueue = [];
+        if (this.phase === 'done') {
+          this.phase = 'idle';
+          this.currentId = null;
+          this.nextId = null;
+          this.levelsDone = 0;
+          this.save();
+        }
+      }
+      if (data.day) this.day = String(data.day);
+      this._lastList = list;
+      this._lastListAt = Date.now();
+      const P = getDailyProduct();
+      if (P && data) P.activities = data;
+      const claimed = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
+      this.levelsDone = claimed;
+      return list;
     },
 
     async loadActivities() {
-      try {
-        const res = await fetch('/api/product/activities', { credentials: 'include' });
-        if (!res || !res.ok) return null;
-        const data = await res.json();
-        const list = data && Array.isArray(data.challenges) ? data.challenges : null;
-        if (list) {
-          this._lastList = list;
-          const P = getDailyProduct();
-          if (P && data) P.activities = data;
-        }
-        return list;
-      } catch (_) {
-        return null;
+      let data = await this.fetchActivitiesOnce(8000);
+      if (!data) {
+        await dailyDelay(500);
+        data = await this.fetchActivitiesOnce(8000);
       }
+      return this.applyActivities(data);
     },
 
     async startAutoRun() {
@@ -2807,96 +2909,120 @@
         return { ok: false, reason: 'disabled' };
       }
       if (window !== window.top) return { ok: false, reason: 'not-top' };
-
-      // 1. 拉取最新进度（优先服务端，失败时回退内存）
-      let list = await this.loadActivities();
-      if (!list || !list.length) list = getDailyChallengeList();
-      if (!list || !list.length) {
-        this.notify('❌ 未读取到每日挑战进度，请确认已登录 147master 账号后重试', 'error', 6000);
-        this.updatePanel();
-        return { ok: false, reason: 'no-progress' };
-      }
-      const total = Math.min(Math.max(1, Number(CONFIG.dailyAuto.totalLevels) || 8), list.length);
-      const claimed = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
-      this.levelsDone = claimed;
-      this.save();
-      this.updatePanel();
-
-      // 2. 已全部完成：只在面板下方提示，不跳转、不进房
-      if (claimed >= total) {
-        this.phase = 'done';
-        this.nextId = null;
+      if (this._startBusy) return { ok: false, reason: 'busy' };
+      this._startBusy = true;
+      try {
+        // 上一轮以“跳过部分关卡”收尾时，用户再次点击启动视为重新尝试这些关卡
+        if (this.phase === 'done') {
+          this._skipped = {};
+          this._silentTries = {};
+        }
+        // 1. 拉取最新进度（优先服务端，失败时回退内存）
+        let list = await this.loadActivities();
+        if (!list || !list.length) list = getDailyChallengeList();
+        if (!list || !list.length) {
+          this.notify('❌ 未读取到每日挑战进度，请确认已登录 147master 账号后重试', 'error', 6000);
+          this.updatePanel();
+          return { ok: false, reason: 'no-progress' };
+        }
+        const total = this.totalCount(list);
+        const claimed = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
+        this.levelsDone = claimed;
         this.save();
-        this.notify('✅ 今日 ' + claimed + '/' + total + ' 每日挑战已全部完成，无需再打', 'success', 0);
-        try { showToast('🎉 今日每日挑战已全部完成（' + claimed + '/' + total + '）', 3200); } catch (_) {}
         this.updatePanel();
-        return { ok: true, done: true, claimed, total };
-      }
 
-      // 3. 有已清台但未领取的，先补齐奖励（只调接口，不进房）
-      const completed = list.find((c) => dailyStatusOf(c) === 'completed');
-      if (completed) {
-        const cname = completed.name || completed.id;
-        this.currentId = completed.id;
-        this.nextId = null;
-        this.phase = 'claiming';
-        this.clearAt = Date.now();
-        this._claimFails = 0;
-        this._claimTries = 0;
-        this._lastClaimPollAt = 0;
-        this.save();
-        this.notify('💰 发现已清台未领取「' + cname + '」，正在补齐奖励…', 'info', 4500);
-        this.updatePanel();
-        this.claimReward(completed.id);
-        return { ok: true, claiming: completed.id, claimed, total };
-      }
+        // 2. 已全部完成：只在面板下方提示，不跳转、不进房
+        if (claimed >= total) {
+          this.phase = 'done';
+          this.nextId = null;
+          this._skipped = {};
+          this.save();
+          this.notify('✅ 今日 ' + claimed + '/' + total + ' 每日挑战已全部完成，无需再打', 'success', 0);
+          try { showToast('🎉 今日每日挑战已全部完成（' + claimed + '/' + total + '）', 3200); } catch (_) {}
+          this.updatePanel();
+          return { ok: true, done: true, claimed, total };
+        }
 
-      // 4. 已经站在挑战房里：原地继续
-      const room = detectDailyChallengeRoom();
-      if (room) {
-        const rname = (room.challenge && room.challenge.name) || room.id;
-        this.currentId = room.id;
-        this.nextId = null;
-        this.phase = 'playing';
-        this.enteredAt = Date.now();
-        this._startAttempted = false;
-        this.shots = 0;
-        this.startedAt = 0;
+        // 3. 有已清台但未领取的，先补齐奖励（只调接口，不进房）
+        const completed = list.find((c) => dailyStatusOf(c) === 'completed');
+        if (completed) {
+          const cname = completed.name || completed.id;
+          this.currentId = completed.id;
+          this.nextId = null;
+          this.phase = 'claiming';
+          this.clearAt = Date.now();
+          this._claimFails = 0;
+          this._claimTries = 0;
+          this._lastClaimPollAt = 0;
+          this.save();
+          this.notify('💰 发现已清台未领取「' + cname + '」，正在补齐奖励…', 'info', 4500);
+          this.updatePanel();
+          this.claimReward(completed.id);
+          return { ok: true, claiming: completed.id, claimed, total };
+        }
+
+        // 4. 已经站在挑战房里：原地继续
+        const room = detectDailyChallengeRoom();
+        if (room) {
+          const rname = (room.challenge && room.challenge.name) || room.id;
+          this.currentId = room.id;
+          this.nextId = null;
+          this.phase = 'playing';
+          this.enteredAt = Date.now();
+          this._startAttempted = false;
+          this.shots = 0;
+          this.startedAt = 0;
+          this.clearAt = 0;
+          this.save();
+          this.notify('▶️ 已在「' + rname + '」挑战房，继续自动击球（进度 ' + claimed + '/' + total + '）', 'info', 4500);
+          this.updatePanel();
+          return { ok: true, inRoom: room.id, claimed, total };
+        }
+
+        // 5. 保护：正在普通对局/练球房时不要跳转，避免把当前球局丢掉
+        const ctx = this.lastCtx || {};
+        if (ctx.isPlayable && !ctx.inLobby) {
+          this.notify('⚠️ 当前正在球桌中（非每日挑战房），请先返回大厅再启动自动完成', 'warn', 6000);
+          this.updatePanel();
+          return { ok: false, reason: 'in-table' };
+        }
+
+        // 6. 选下一关；大厅由常驻 lobbyTick 驱动，其他页面先回大厅再交给它
+        const next = this.pickNext(list);
+        if (!next) {
+          this.phase = 'done';
+          this.nextId = null;
+          this.save();
+          const skippedN = Object.keys(this._skipped || {}).length;
+          const left = total - claimed;
+          const msg = (left > 0 && skippedN > 0)
+            ? '⏭️ 今日已完成 ' + claimed + '/' + total + '，剩余 ' + left + ' 关已跳过（' + skippedN + ' 关）'
+            : '✅ 没有待完成的每日挑战（' + claimed + '/' + total + '）';
+          this.notify(msg, 'success', 0);
+          this.updatePanel();
+          return { ok: true, done: true, claimed, total, skipped: skippedN };
+        }
+        const nname = next.name || next.id;
+        this.currentId = null;
+        this.nextId = next.id;
+        this.phase = 'advancing';
         this.clearAt = 0;
         this.save();
-        this.notify('▶️ 已在「' + rname + '」挑战房，继续自动击球（进度 ' + claimed + '/' + total + '）', 'info', 4500);
+        this.notify('🚀 已开始自动完成每日挑战：当前 ' + claimed + '/' + total + '，剩余 ' + (total - claimed) + ' 关，正在进入「' + nname + '」', 'success', 5200);
         this.updatePanel();
-        return { ok: true, inRoom: room.id, claimed, total };
-      }
+        devLog('info', '[每日挑战] 面板一键启动，下一关', next.id);
 
-      // 5. 选下一关；大厅由常驻 lobbyTick 驱动，其他页面先回大厅再交给它
-      const next = this.pickNext(list);
-      if (!next) {
-        this.phase = 'done';
-        this.nextId = null;
-        this.save();
-        this.notify('✅ 没有待完成的每日挑战（' + claimed + '/' + total + '）', 'success', 0);
-        this.updatePanel();
-        return { ok: true, done: true, claimed, total };
+        if (!/^\/$/.test(location.pathname)) {
+          if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+          this._navTimer = setTimeout(() => {
+            this._navTimer = null;
+            try { location.href = DAILY_HOME_URL; } catch (_) {}
+          }, 400);
+        }
+        return { ok: true, nextId: next.id, claimed, total };
+      } finally {
+        this._startBusy = false;
       }
-      const nname = next.name || next.id;
-      this.currentId = null;
-      this.nextId = next.id;
-      this.phase = 'advancing';
-      this.clearAt = 0;
-      this.save();
-      this.notify('🚀 已开始自动完成每日挑战：当前 ' + claimed + '/' + total + '，剩余 ' + (total - claimed) + ' 关，正在进入「' + nname + '」', 'success', 5200);
-      this.updatePanel();
-      devLog('info', '[每日挑战] 面板一键启动，下一关', next.id);
-
-      if (!/^\/$/.test(location.pathname)) {
-        if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
-        this._navTimer = setTimeout(() => {
-          this._navTimer = null;
-          try { location.href = DAILY_HOME_URL; } catch (_) {}
-        }, 400);
-      }
-      return { ok: true, nextId: next.id, claimed, total };
     },
 
     setPhase(phase, id, resetEntered) {
@@ -2936,6 +3062,7 @@
     tick(state, ctx) {
       if (!CONFIG.dailyAuto.enabled) return;
       if (window !== window.top) return;
+      this.lastCtx = ctx || {};
       const room = detectDailyChallengeRoom();
       if (room) {
         const sameRoom = this.currentId === room.id;
@@ -3049,15 +3176,28 @@
       this.refreshActivities();
     },
 
+    claimKeyName(id) {
+      return String(this.day || 'na') + '|' + String(id || '').toLowerCase();
+    },
+
+    claimKey(id) {
+      const k = this.claimKeyName(id);
+      if (!this._claimKeys[k]) {
+        this._claimKeys[k] = (window.crypto && typeof crypto.randomUUID === 'function')
+          ? crypto.randomUUID()
+          : ('snk-daily-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      }
+      return this._claimKeys[k];
+    },
+
     async claimReward(id) {
-      if (this._claimInflight || !id) return;
+      if (this._claimInflight || !id) return false;
       this._claimInflight = true;
       this._claimTries += 1;
       let status = 0;
+      let errCode = '';
       try {
-        const key = (window.crypto && typeof crypto.randomUUID === 'function')
-          ? crypto.randomUUID()
-          : ('snk-daily-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+        const key = this.claimKey(id);
         const headers = { 'Content-Type': 'application/json', 'Idempotency-Key': key };
         try {
           let rev = '';
@@ -3073,8 +3213,20 @@
           body: JSON.stringify({ id: id }),
         });
         status = res ? res.status : 0;
-        if (!res || !res.ok) this._claimFails += 1;
-        devLog('info', '[每日挑战] 领取接口返回', status);
+        let body = null;
+        try { body = res ? await res.json() : null; } catch (_) {}
+        errCode = body && body.error ? String(body.error) : '';
+        if (res && res.ok) {
+          // 成功：等待 refreshActivities 确认状态
+        } else if (status === 409 && errCode === 'already_claimed') {
+          this._claimFails = 0;
+          devLog('info', '[每日挑战] 该奖励已领取过，按成功处理', id);
+        } else if (status === 409 && errCode === 'challenge_not_completed') {
+          devLog('info', '[每日挑战] 服务端尚未标记完成，继续等待', id);
+        } else {
+          this._claimFails += 1;
+        }
+        devLog('info', '[每日挑战] 领取接口返回', status, errCode || '-');
       } catch (err) {
         this._claimFails += 1;
         devLog('warn', '[每日挑战] 领取接口异常', err);
@@ -3082,10 +3234,12 @@
         this._claimInflight = false;
       }
       await this.refreshActivities();
+      const ch = findDailyChallengeById(id);
+      const isClaimed = Boolean(ch && dailyStatusOf(ch) === 'claimed');
+      if (isClaimed) delete this._claimKeys[this.claimKeyName(id)];
       // 领取成功后立刻推进，避免依赖 frame()/tick 才继续（大厅等页面也能走完）
       if (this.phase === 'claiming') {
-        const ch = findDailyChallengeById(id);
-        if (ch && dailyStatusOf(ch) === 'claimed') {
+        if (isClaimed) {
           this.levelsDone = this.countClaimed();
           this.notify('💰 已领取「' + (ch.name || id) + '」，进度 ' + this.progressText(), 'success', 3500);
           this.updatePanel();
@@ -3094,25 +3248,21 @@
           this.notify('💰 领取请求已提交，等待服务端确认「' + (ch ? (ch.name || id) : id) + '」…', 'info', 3000);
         }
       }
+      return true;
     },
 
     async refreshActivities() {
-      try {
-        const res = await fetch('/api/product/activities', { credentials: 'include' });
-        if (!res || !res.ok) return false;
-        const data = await res.json();
-        const P = getDailyProduct();
-        if (P && data) P.activities = data;
-        return true;
-      } catch (_) {
-        return false;
-      }
+      const data = await this.fetchActivitiesOnce(8000);
+      return Boolean(this.applyActivities(data));
     },
 
     pickNext(list) {
       if (!list || !list.length) return null;
       for (let i = 0; i < list.length; i++) {
-        if (dailyStatusOf(list[i]) !== 'claimed') return list[i];
+        const c = list[i];
+        if (!c || !c.id) continue;
+        if (this._skipped && this._skipped[c.id]) continue;
+        if (dailyStatusOf(c) !== 'claimed') return c;
       }
       return null;
     },
@@ -3127,13 +3277,18 @@
         this.updatePanel();
         return;
       }
-      const list = getDailyChallengeList() || [];
+      const list = getDailyChallengeList() || this._lastList || [];
       if (!list.length) { this.pause('未读取到每日挑战进度，已停止自动连打'); return; }
+      const total = this.totalCount(list);
       const claimed = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
       this.levelsDone = claimed;
-      if (claimed >= CONFIG.dailyAuto.totalLevels) { this.finish(); return; }
+      if (claimed >= total) { this.finish(); return; }
       const next = this.pickNext(list);
-      if (!next) { this.finish(); return; }
+      if (!next) {
+        // 剩余关卡都被手动跳过：不再无限尝试，直接收尾
+        this.finish();
+        return;
+      }
       // 若下一关此前已清台但未领取（completed），先把奖励补齐再继续
       if (dailyStatusOf(next) === 'completed') {
         this.currentId = next.id;
@@ -3151,7 +3306,7 @@
       this.nextId = next.id;
       this.phase = 'advancing';
       this.save();
-      this.notify('➡️ 已完成 ' + claimed + '/' + CONFIG.dailyAuto.totalLevels + '，前往下一关：' + (next.name || next.id), 'info', 4200);
+      this.notify('➡️ 已完成 ' + claimed + '/' + total + '，前往下一关：' + (next.name || next.id), 'info', 4200);
       this.updatePanel();
       devLog('info', '[每日挑战] 下一关', next.id);
       if (/^\/$/.test(location.pathname)) {
@@ -3166,16 +3321,32 @@
     },
 
     finish() {
+      const list = getDailyChallengeList() || this._lastList || [];
+      const total = this.totalCount(list);
+      const claimed = list.length
+        ? list.filter((c) => dailyStatusOf(c) === 'claimed').length
+        : this.countClaimed();
+      const skipped = Object.keys(this._skipped || {}).length;
+      const allDone = claimed >= total;
       this.phase = 'done';
       this.nextId = null;
-      this.levelsDone = this.countClaimed();
+      this.levelsDone = claimed;
       this.save();
       clearDailyEntryMarker();
-      try { if (DailyChallengeEngine.running) DailyChallengeEngine.stop('🎉 8/8 每日挑战全部完成'); } catch (_) {}
-      showToast('🎉 每日挑战 8/8 全部完成，已停止自动连打', 3200);
-      this.notify('🎉 今日 8 个每日挑战已全部完成（8/8），自动化已停止', 'success', 0);
+      const toastText = allDone
+        ? '🎉 每日挑战 ' + claimed + '/' + total + ' 全部完成，已停止自动连打'
+        : '⏭️ 已完成 ' + claimed + '/' + total + '，另有 ' + skipped + ' 关被跳过，自动化已停止';
+      try { if (DailyChallengeEngine.running) DailyChallengeEngine.stop(toastText); } catch (_) {}
+      showToast(toastText, 3200);
+      this.notify(
+        allDone
+          ? '🎉 今日 ' + total + ' 个每日挑战已全部完成（' + claimed + '/' + total + '），自动化已停止'
+          : '⏭️ 今日已完成 ' + claimed + '/' + total + '，跳过 ' + skipped + ' 关，自动化已停止（可稍后手动补打剩余关卡）',
+        allDone ? 'success' : 'warn',
+        0
+      );
       this.updatePanel();
-      devLog('info', '[每日挑战] 8/8 全部完成');
+      devLog('info', '[每日挑战] 结束 claimed=' + claimed + '/' + total + ' skipped=' + skipped);
     },
 
     pause(reason) {
@@ -3184,7 +3355,6 @@
       this.save();
       if (DailyChallengeEngine.running) DailyChallengeEngine.stop(reason || '已暂停每日挑战自动连打');
       if (reason) {
-        showToast(reason, 2000);
         this.notify('⏸️ ' + reason, 'warn', 5000);
       } else {
         this.notify('⏸️ 已暂停自动完成每日挑战（当前进度 ' + this.progressText() + '）', 'warn', 5000);
@@ -3215,7 +3385,6 @@
         this.startedAt = 0;
         this.clearAt = 0;
         this.save();
-        showToast('🔁 ' + (reason || '本关未能清台') + '，已点击「重打」自动重试第 ' + this._retries + ' 次', 2400);
         this.notify('🔁 本关未清台，已点击「重打」自动重试（第 ' + this._retries + ' 次）', 'warn', 4000);
         this.updatePanel();
         devLog('info', '[每日挑战] 点击重打重试本关 ' + id);
@@ -3225,7 +3394,6 @@
       this.nextId = id;
       this.clearAt = 0;
       this.save();
-      showToast('🔁 ' + (reason || '本关未能清台') + '，自动重试第 ' + this._retries + ' 次', 2400);
       this.notify('🔁 ' + (reason || '本关未能清台') + '，自动重试第 ' + this._retries + ' 次', 'warn', 4000);
       this.updatePanel();
       devLog('info', '[每日挑战] 自动重试本关 ' + id + '（第 ' + this._retries + ' 次）');
@@ -3234,6 +3402,58 @@
         this._navTimer = null;
         try { location.href = DAILY_HOME_URL; } catch (_) {}
       }, 1400);
+    },
+
+    skipCurrent() {
+      const id = this.currentId || this.nextId;
+      if (!id) {
+        this.notify('⚠️ 当前没有进行中的关卡可跳过', 'warn', 3000);
+        return false;
+      }
+      if (this.phase === 'idle' || this.phase === 'done') {
+        this.notify('⚠️ 自动化未在运行，无需跳过', 'warn', 3000);
+        return false;
+      }
+      this._skipped = this._skipped || {};
+      this._skipped[id] = true;
+      try { if (DailyChallengeEngine.running) DailyChallengeEngine.stop('已跳过本关'); } catch (_) {}
+      if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+      this.currentId = null;
+      this.nextId = null;
+      this.clearAt = 0;
+      this._claimFails = 0;
+      this._claimTries = 0;
+      this._startAttempted = false;
+      this._lastClaimPollAt = 0;
+      this.save();
+      const list = getDailyChallengeList() || this._lastList || [];
+      const next = this.pickNext(list);
+      const ch = findDailyChallengeById(id);
+      const name = (ch && ch.name) || id;
+      if (!next) {
+        this.notify('⏭️ 已跳过「' + name + '」，今日已无可自动进行的关卡', 'warn', 4500);
+        this.finish();
+        if (!/^\/$/.test(location.pathname)) {
+          this._navTimer = setTimeout(() => {
+            this._navTimer = null;
+            try { location.href = DAILY_HOME_URL; } catch (_) {}
+          }, 500);
+        }
+        return true;
+      }
+      this.nextId = next.id;
+      this.phase = 'advancing';
+      this.save();
+      this.notify('⏭️ 已跳过「' + name + '」，前往下一关：' + (next.name || next.id), 'warn', 4500);
+      this.updatePanel();
+      if (!/^\/$/.test(location.pathname)) {
+        this._navTimer = setTimeout(() => {
+          this._navTimer = null;
+          try { location.href = DAILY_HOME_URL; } catch (_) {}
+        }, 600);
+      }
+      devLog('info', '[每日挑战] 跳过本关 ' + id);
+      return true;
     },
 
     resume() {
@@ -3288,11 +3508,47 @@
       const now = Date.now();
       if (now - this._lastSilentClaimAt < 5000) return;
       this._lastSilentClaimAt = now;
-      const list = getDailyChallengeList();
+      const list = getDailyChallengeList() || this._lastList;
       if (!list) return;
       const completed = list.filter((c) => dailyStatusOf(c) === 'completed');
       if (!completed.length) return;
-      completed.slice(0, 3).forEach((c) => this.claimReward(c.id));
+      this._silentQueue = this._silentQueue || [];
+      this._silentTries = this._silentTries || {};
+      completed.forEach((c) => {
+        const id = c.id;
+        if (!id) return;
+        if (this.phase === 'claiming' && this.currentId === id) return; // 主流程正在领取这一关
+        if (Number(this._silentTries[id]) >= 5) return;
+        if (this._silentQueue.indexOf(id) < 0) this._silentQueue.push(id);
+      });
+      this._pumpSilentClaims();
+    },
+
+    async _pumpSilentClaims() {
+      if (this._silentBusy) return;
+      this._silentQueue = this._silentQueue || [];
+      if (!this._silentQueue.length) return;
+      if (this._claimInflight) {
+        setTimeout(() => { try { this._pumpSilentClaims(); } catch (_) {} }, 1500);
+        return;
+      }
+      this._silentBusy = true;
+      try {
+        const id = this._silentQueue.shift();
+        this._silentTries[id] = (Number(this._silentTries[id]) || 0) + 1;
+        const ch = findDailyChallengeById(id);
+        if (ch && dailyStatusOf(ch) === 'completed') {
+          await this.claimReward(id);
+        }
+        const after = findDailyChallengeById(id);
+        if (after && dailyStatusOf(after) === 'completed' && Number(this._silentTries[id]) < 5) {
+          this._silentQueue.push(id);
+        }
+      } catch (_) {}
+      this._silentBusy = false;
+      if (this._silentQueue.length) {
+        setTimeout(() => { try { this._pumpSilentClaims(); } catch (_) {} }, 300);
+      }
     },
 
     findDailyCard() {
@@ -3351,13 +3607,52 @@
       }
       if (!btn) { this.pause('未找到可挑战的关卡：' + id); return; }
       if (this.phase !== 'advancing') return;
+
+      // v1.7.11：点击前复核目标状态，避免多端/多标签竞争导致白等 20 秒
+      const fresh = await this.loadActivities();
+      if (fresh) {
+        const t = fresh.find((c) => String(c.id).toLowerCase() === String(id).toLowerCase());
+        const st = t ? dailyStatusOf(t) : 'missing';
+        if (st === 'claimed' || st === 'missing') {
+          const alt = this.pickNext(fresh);
+          if (alt && String(alt.id).toLowerCase() !== String(id).toLowerCase()) {
+            this.nextId = alt.id;
+            this.save();
+            return this.driveToNext(alt.id);
+          }
+          if (!alt) { this.finish(); return; }
+          this.pause('目标关卡状态已变化且无其他可挑战关卡：' + id);
+          return;
+        }
+        if (st === 'completed') {
+          this.currentId = id;
+          this.nextId = null;
+          this.phase = 'claiming';
+          this.clearAt = Date.now();
+          this._claimFails = 0;
+          this._claimTries = 0;
+          this._lastClaimPollAt = 0;
+          this.save();
+          this.notify('💰 「' + (t.name || id) + '」已清台未领取，先补领奖励…', 'info', 3500);
+          this.updatePanel();
+          this.claimReward(id);
+          return;
+        }
+        if (st !== 'ready') {
+          this.pause('关卡「' + id + '」当前状态为 ' + st + '，无法挑战');
+          return;
+        }
+      }
+
       writeDailyEntryMarker(id, '');
       this.currentId = id;
       this.phase = 'playing';
       this.enteredAt = Date.now();
       this._startAttempted = false;
+      this._retries = 0;
       this.shots = 0;
       this.startedAt = 0;
+      this.clearAt = 0;
       this.nextId = null;
       this.save();
       devLog('info', '[每日挑战] 自动进入下一关', id);
@@ -4183,6 +4478,38 @@
   }
 
   // 3. Mathavan (2010) 64步累积冲量库边碰撞动力学求解器 (完全对齐 147master 原生 v3CushionCollision)
+  let _livePhyCache = { at: 0, val: {} };
+  function getLivePhysicsOverrides() {
+    const now = Date.now();
+    if (now - _livePhyCache.at < 2000 && _livePhyCache.val) return _livePhyCache.val;
+    let val = {};
+    try {
+      const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
+      const core = (typeof window !== 'undefined' && window.threeGame && window.threeGame.core) || null;
+      const coreConfig = core ? ((typeof core.getConfig === 'function' ? core.getConfig() : core.config) || {}) : {};
+      const sources = [cfg.physics || {}, coreConfig.physics || {}];
+      const pick = (k) => {
+        for (let i = sources.length - 1; i >= 0; i--) {
+          const ph = sources[i] || {};
+          const ov = ph.overrides || {};
+          const st = ph.settings || {};
+          const v = Number(ov[k] || st[k]);
+          if (v) return v;
+        }
+        return 0;
+      };
+      val = {
+        rollingFriction: pick('rollingFriction'),
+        railRestitution: pick('railRestitution'),
+        tableSlidingAccel: pick('tableSlidingAccel'),
+      };
+    } catch (_) {
+      val = {};
+    }
+    _livePhyCache = { at: now, val };
+    return val;
+  }
+
   function resolvePhysicsCushionRebound(vel, omega, normal, params = {}) {
     const approachSpeed = -(vel.x * normal.x + vel.y * normal.y);
     if (approachSpeed <= 0) return { vel: { ...vel }, omega: { ...omega } };
@@ -4193,7 +4520,8 @@
     const cosTheta = Math.sqrt(Math.max(1e-12, 1 - sinTheta * sinTheta)); // ~0.916515
     const cushionMu = CONFIG.cushionContactFrictionMu || 0.18;
     const clothMu = CONFIG.clothSlidingMu || 0.18;
-    const baseRestitution = params.restitution || CONFIG.railRestitution || 0.98;
+    const livePhy = getLivePhysicsOverrides();
+    const baseRestitution = params.restitution || livePhy.railRestitution || CONFIG.railRestitution || 0.91;
     const energeticRestitution = getCushionRestitution(baseRestitution, approachSpeed);
 
     const tangent = { x: -normal.y, y: normal.x };
@@ -4296,7 +4624,8 @@
       }
 
       const dist = Math.hypot(hit.point.x - curPos.x, hit.point.y - curPos.y);
-      const decel = CONFIG.clothRollingDecelMmS2 || 110;
+      const livePhy = getLivePhysicsOverrides();
+      const decel = Number(livePhy.rollingFriction) || CONFIG.clothRollingDecelMmS2 || 125;
       const impactSpeed = Math.sqrt(Math.max(100, curSpeed * curSpeed - 2 * decel * dist));
       const speedRatio = impactSpeed / curSpeed;
       vel.x *= speedRatio;
@@ -4330,7 +4659,7 @@
 
     const hitPt = (railHit && railHit.point) ? railHit.point : (railHit || cuePos);
     const distMm = Math.hypot(hitPt.x - cuePos.x, hitPt.y - cuePos.y);
-    const rollingDecel = CONFIG.clothRollingDecelMmS2 || 110;
+    const rollingDecel = CONFIG.clothRollingDecelMmS2 || 125;
     // 计算到达库边时的衰减残余动能速度 (保证长距离击打仍能完整展现反弹折线)
     const vArrival = Math.max(120, Math.sqrt(Math.max(14400, initialSpeed * initialSpeed - 2 * rollingDecel * distMm)));
 
@@ -4387,7 +4716,7 @@
           curOmega.y -= deltaVx * 2.5 / R;
         }
       } else {
-        const decel = CONFIG.clothRollingDecelMmS2 || 110;
+        const decel = CONFIG.clothRollingDecelMmS2 || 125;
         const nextSpeed = Math.max(0, curSpeed - decel * dt);
         if (nextSpeed <= 0) break;
         const ratio = nextSpeed / curSpeed;
@@ -6603,9 +6932,11 @@
       // 3.2) 【目标球吃库反弹折线】：仅在瞄准静态预览时显示，出杆走位中不绘制 (走完即彻底终结，绝不画弹库残留)
       if (!inMotion && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
         for (const seg of t.reboundSegments) {
-          if (!seg || !seg.p1 || !seg.p2) continue;
-          const px1 = this.localCloth(seg.p1, cueWorld);
-          const px2 = this.localCloth(seg.p2, cueWorld);
+          const p1 = seg && (seg.p1 || seg.from);
+          const p2 = seg && (seg.p2 || seg.to);
+          if (!p1 || !p2) continue;
+          const px1 = this.localCloth(p1, cueWorld);
+          const px2 = this.localCloth(p2, cueWorld);
           if (px1 && px2) {
             hasProjected = true;
             ctx.save();
@@ -7086,7 +7417,7 @@
       ].join(' ');
       this.panel.appendChild(this.body);
 
-      // 【每日挑战自动化】一键完成按钮 + 按钮下方状态提示 (v1.7.10)
+      // 【每日挑战自动化】一键完成按钮 + 按钮下方状态提示 (v1.7.11)
       const dailyBtn = document.createElement('button');
       dailyBtn.id = 'snooker-daily-challenge-btn';
       dailyBtn.type = 'button';
@@ -7162,6 +7493,15 @@
           }
         } catch (_) {}
         const busy = engineRunning || phase === 'playing' || phase === 'claiming' || phase === 'advancing';
+        let canSkip = false;
+        try {
+          if (typeof DailyRunner !== 'undefined' && DailyRunner && phase !== 'idle' && phase !== 'done') {
+            canSkip = Boolean(DailyRunner.currentId || DailyRunner.nextId);
+          }
+        } catch (_) {}
+        if (this.dailySkipBtn) {
+          setImp(this.dailySkipBtn, 'display', canSkip ? 'flex' : 'none');
+        }
         if (busy) {
           this.dailyChallengeBtn.textContent = '⏸️ 暂停自动化' + (progress ? '（' + progress + '）' : '');
           this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)';
@@ -7203,6 +7543,7 @@
       dailyBtn.onclick = (e) => {
         e.stopPropagation();
         e.preventDefault();
+        if (typeof DailyRunner !== 'undefined' && DailyRunner && DailyRunner._startBusy) return;
         try {
           if (typeof DailyRunner !== 'undefined' && DailyRunner && typeof DailyRunner.startAutoRun === 'function') {
             if (typeof DailyRunner.isBusy === 'function' && DailyRunner.isBusy()) {
@@ -7221,6 +7562,41 @@
       this.updateDailyChallengeBtn();
       this.body.appendChild(dailyBtn);
       this.body.appendChild(dailyMsg);
+
+      // 【跳过本关】某关反复清不掉时，保留未完成并继续下一关（v1.7.11）
+      const skipBtn = document.createElement('button');
+      skipBtn.id = 'snooker-daily-skip-btn';
+      skipBtn.type = 'button';
+      skipBtn.textContent = '⏭️ 跳过当前关卡（保留未完成）';
+      skipBtn.style.cssText = [
+        'width: 100% !important;',
+        'padding: 6px 8px !important;',
+        'margin: -2px 0 8px 0 !important;',
+        'border: 1px solid rgba(255, 170, 60, 0.55) !important;',
+        'border-radius: 6px !important;',
+        'background: rgba(255, 170, 60, 0.14) !important;',
+        'color: #ffcf8a !important;',
+        'font-size: 11.5px !important;',
+        'font-weight: 600 !important;',
+        'cursor: pointer !important;',
+        'display: none !important;',
+        'align-items: center !important;',
+        'justify-content: center !important;',
+        'user-select: none !important;',
+      ].join(' ');
+      skipBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        try {
+          if (typeof DailyRunner !== 'undefined' && DailyRunner && typeof DailyRunner.skipCurrent === 'function') {
+            DailyRunner.skipCurrent();
+          }
+        } catch (_) {}
+        this.updateDailyChallengeBtn();
+      };
+      this.dailySkipBtn = skipBtn;
+      this.body.appendChild(skipBtn);
+      this.updateDailyChallengeBtn();
 
       // 【真实走位 vs 蓝色落位预测线】轨迹对比记录与导出按钮组 (v1.7.7)
       const recordRow = document.createElement('div');
@@ -7971,7 +8347,7 @@
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
 
-      // 【每日挑战全自动 v1.7.10】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
+      // 【每日挑战全自动 v1.7.11】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
       try {
         if (typeof DailyRunner !== 'undefined' && DailyRunner) {
           DailyRunner.tick(rawState, { isPlayable, inLobby, isSettlement, isLoading, hasCanvas });
@@ -8306,3 +8682,6 @@
 
   boot();
 })();
+
+
+
