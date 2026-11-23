@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.15
+// @version      1.8.0
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.15';
+  const SCRIPT_VERSION = '1.8.0';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -45,8 +45,6 @@
 
     // 【母球吃库反弹折线】：天蓝色 #86cfff 实线，粗细 1.6px (与绿色瞄准线一致)
     showCushionRebound: true,
-    reboundMethod: 'native-local',     // 'worker'(途径1) | 'native-local'(官方内核算，可超400mm) | 'algo'(途径2)
-    reboundMaxPathMm: 800,             // native-local 反弹折线最大长度（官方原始截断为 400mm）
     cueCushionReboundColor: '#86cfff', // 游戏原生新手天蓝色反弹线 #86cfff
     cueCushionReboundWidthPx: 1.6,     // 与绿色瞄准线 1.6px 完全一致
     showObjectRebound: true,           // 目标球吃库反弹折线
@@ -155,18 +153,6 @@
           _configVersion++;
         }
       }
-      if (typeof saved.reboundMethod === 'string' &&
-          (saved.reboundMethod === 'worker' || saved.reboundMethod === 'algo' || saved.reboundMethod === 'native-local')) {
-        CONFIG.reboundMethod = saved.reboundMethod;
-      }
-      // 老存档迁移：v1.7.11 及以前只存过 worker/algo，没有 reboundMaxPathMm；
-      // 升级到 native-local 后默认启用官方内核复算（用户仍可在配置里改回 worker/algo）
-      if (saved.reboundMethod === 'worker' && !Number.isFinite(Number(saved.reboundMaxPathMm))) {
-        CONFIG.reboundMethod = 'native-local';
-      }
-      if (Number.isFinite(Number(saved.reboundMaxPathMm))) {
-        CONFIG.reboundMaxPathMm = Math.max(400, Math.round(Number(saved.reboundMaxPathMm)));
-      }
     } catch (_) {}
     if (!_storageListenerInstalled && typeof window !== 'undefined') {
       _storageListenerInstalled = true;
@@ -180,8 +166,6 @@
     try {
       const obj = {};
       for (const key of TOGGLE_KEYS) obj[key] = CONFIG[key];
-      obj.reboundMethod = CONFIG.reboundMethod;
-      obj.reboundMaxPathMm = CONFIG.reboundMaxPathMm;
       localStorage.setItem(CONFIG.togglesKey, JSON.stringify(obj));
     } catch (_) {}
     _configVersion++;
@@ -486,10 +470,8 @@
 
   const NativeWorkerBridge = {
     activeWorker: null,
-    latestRebound: null,
     latestAim: null,
     latestRequest: null,
-    lastReboundTime: 0,
     lastAimTime: 0,
     lastRequestTime: 0,
 
@@ -543,10 +525,7 @@
           if (data.result) {
             const res = data.result;
             const now = performance.now();
-            if (res.kind === 'rebound') {
-              NativeWorkerBridge.latestRebound = res;
-              NativeWorkerBridge.lastReboundTime = now;
-            } else if (Array.isArray(res.targetPath) || Array.isArray(res.cuePath)) {
+            if (Array.isArray(res.targetPath) || Array.isArray(res.cuePath)) {
               NativeWorkerBridge.latestAim = res;
               NativeWorkerBridge.lastAimTime = now;
             }
@@ -597,9 +576,6 @@
     payloadFactory: null,
     simMs: 0,
     frames: 0,
-    _nativePred: null,
-    _nativePredMm: 0,
-    _nativeMod: null,
     _nativeCacheKey: '',
     _nativeCacheResult: null,
 
@@ -756,7 +732,7 @@
 
     // 复用游戏 Worker 最近一次真实反弹请求。它包含当前球桌的内核物理参数、
     // 精确球位与官方 shot 状态；只要当前瞄准与它一致，直接返回该载荷，
-    // 这样 native-local 复算的入射/反射角与途径1的 Worker 完全同源。
+    // 这样复算的入射/反射角与游戏 Worker 使用的官方输入完全同源。
     compatibleWorkerPayload(state, shot, boundary) {
       const req = NativeWorkerBridge.latestRequest;
       const p = req && req.payload;
@@ -958,92 +934,121 @@
       };
     },
 
-    // 【官方内核反弹复算 native-local】
-    // 直接调用本地 game-core 包里的 module 67 (createReboundInput + predictRebound)，
-    // 把官方函数里硬编码的 400mm 截断替换成 CONFIG.reboundMaxPathMm，
-    // 物理仍由 module 68 的 startShot/stepShot 驱动，不改动页面上的官方函数。
-    nativePredictor(maxMm) {
-      const mm = Math.max(400, Math.round(Number(maxMm) || 400));
-      if (this._nativePred && this._nativePredMm === mm) return this._nativePred;
-      if (!this.loadModule) return null;
-      let mod = null;
-      let runtime = null;
-      try {
-        mod = this.loadModule(67);
-        runtime = this.loadModule(68);
-      } catch (_) {}
-      if (!mod || typeof mod.predictRebound !== 'function' || typeof mod.createReboundInput !== 'function') return null;
-      if (!runtime || typeof runtime.startShot !== 'function') return null;
-      let src = '';
-      try { src = String(mod.predictRebound); } catch (_) { return null; }
-      if (src.indexOf('400') < 0) return null;
-      let fn = null;
-      try {
-        const patched = src.replace(/\b400\b/g, 'MAX_MM');
-        fn = new Function(
-          'Runtime', 'point', 'matchesExpectedCushion', 'MAX_MM',
-          '"use strict"; return (' + patched + ');'
-        )(
-          runtime,
-          (p) => ({ x: p.x, y: p.y }),
-          (payload, event) => !payload || !payload.expectedColliderId || (event && event.colliderId === payload.expectedColliderId),
-          mm
-        );
-      } catch (_) {
-        fn = null;
-      }
-      if (!fn) return null;
-      this._nativePred = fn;
-      this._nativePredMm = mm;
-      this._nativeMod = mod;
-      return fn;
-    },
-
-    pathPointAtMm(path, mm) {
-      if (!Array.isArray(path) || path.length < 2) return null;
-      let cum = 0;
-      for (let i = 1; i < path.length; i++) {
-        const p = path[i - 1];
-        const q = path[i];
-        const seg = Math.hypot(q.x - p.x, q.y - p.y);
-        if (cum + seg >= mm) {
-          const f = (mm - cum) / seg;
-          return { x: p.x + (q.x - p.x) * f, y: p.y + (q.y - p.y) * f };
-        }
-        cum += seg;
-      }
-      return null;
-    },
-
-    nativeRebound(payload, maxMm, cacheKey) {
+    // 【母球吃库反弹：官方内核两库段】
+    // 直接调用本地 game-core 的 module 67 createReboundInput + module 68
+    // startShot/stepShot，逐物理步进：
+    // 起点 = 母球第一次碰到的库边接触点；
+    // 终点 = 反弹后第二次碰到的库边接触点（若中途碰球/停球则提前结束）。
+    nativeTwoRail(payload, cacheKey) {
       if (!payload) return null;
-      const mm = Math.max(400, Math.round(Number(maxMm) || 400));
-      const ck = (cacheKey ? String(cacheKey) : '') + '|' + mm;
-      if (cacheKey && this._nativeCacheKey === ck && this._nativeCacheResult) {
+      const ck = cacheKey ? String(cacheKey) : '';
+      if (ck && this._nativeCacheKey === ck && this._nativeCacheResult) {
         return this._nativeCacheResult;
       }
       if (this.status === 'idle') this.load();
       if (this.status !== 'ready') return null;
-      const pred = this.nativePredictor(mm);
-      const mod = this._nativeMod;
-      if (!pred || !mod) return null;
+      const Runtime = this.loadModule ? this.loadModule(68) : null;
+      const mod = this.loadModule ? this.loadModule(67) : null;
+      if (!Runtime || typeof Runtime.startShot !== 'function' ||
+          !mod || typeof mod.createReboundInput !== 'function') {
+        return null;
+      }
       try {
         const contact = payload.expectedColliderId
           ? { line: { id: payload.expectedColliderId, role: payload.expectedColliderRole } }
           : {};
         const input = mod.createReboundInput(payload, contact);
-        const res = pred(input.payload || input);
-        if (!res || !res.hit || !Array.isArray(res.path) || res.path.length < 2) return null;
-        if (cacheKey) {
+        const p = input.payload || payload;
+        const rt = Runtime.startShot({ ...p, captureFrames: false, maxSeconds: 18 });
+        const state = rt.state;
+        const physics = rt.physics;
+        if (!state || !physics || typeof physics.step !== 'function') return null;
+        const cue = (state.balls || []).find((b) => b.id === state.cueBallId);
+        if (!cue) return null;
+
+        const dt = physics.params && physics.params.fixedDt;
+        if (!Number.isFinite(dt) || dt <= 0) return null;
+        const radius = Number.isFinite(Number(cue.radius)) ? Number(cue.radius) : BALL_RADIUS_MM;
+        const path = [];
+        let last = null;
+        let first = null;
+        let second = null;
+        let travelledMm = 0;
+
+        const add = (pt) => {
+          if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+          if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) >= 4) {
+            path.push({ x: pt.x, y: pt.y });
+            last = { x: pt.x, y: pt.y };
+          }
+        };
+        const railPoint = (event, fallback) => {
+          if (event && event.point && event.normal) {
+            return {
+              x: event.point.x + event.normal.x * radius,
+              y: event.point.y + event.normal.y * radius,
+            };
+          }
+          return fallback ? { x: fallback.x, y: fallback.y } : null;
+        };
+
+        for (let i = 0; i < Math.ceil(18 / dt); i++) {
+          const before = { x: cue.pos.x, y: cue.pos.y };
+          physics.step(state, dt);
+          const events = (state.physicsEvents || []).filter((e) =>
+            e && (e.ballId === cue.id || e.ballAId === cue.id || e.ballBId === cue.id));
+          const railEvent = events.find((e) =>
+            e.type === 'ball-hit-rail' || e.type === 'ball-hit-pocket-jaw');
+
+          if (!first) {
+            if (railEvent) {
+              first = railPoint(railEvent, before);
+              add(first);
+            } else if (events.length) {
+              // 第一次碰到的不是库，说明路径被球挡住，放弃这条两库折线
+              return null;
+            }
+          } else if (railEvent) {
+            second = railPoint(railEvent, before);
+            add(second);
+            break;
+          } else {
+            if (events.some((e) => e.type === 'ball-hit-ball')) {
+              add({ x: cue.pos.x, y: cue.pos.y });
+              break;
+            }
+            add({ x: cue.pos.x, y: cue.pos.y });
+          }
+
+          if (cue.potted) break;
+          if (physics.isTableMoving && !physics.isTableMoving(state)) break;
+        }
+
+        if (!first || path.length < 2) return null;
+        for (let i = 1; i < path.length; i++) {
+          travelledMm += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
+        }
+        const res = {
+          hit: true,
+          path,
+          travelledMm,
+          first,
+          second,
+          secondRailHit: Boolean(second),
+          cuePotted: Boolean(cue.potted),
+        };
+        if (ck) {
           this._nativeCacheKey = ck;
           this._nativeCacheResult = res;
         }
         return res;
       } catch (err) {
-        devLog('warn', '[反弹] native-local 复算失败', err);
+        devLog('warn', '[反弹] 官方内核两库复算失败', err);
         return null;
       }
     },
+
+
 
     get(key, factory, contextInfo = null) {
       if (!CONFIG.engineSimEnabled) return null;
@@ -4825,150 +4830,6 @@
     return tracePhysicsRailReflections(startPos, v, w, cushionX, cushionY, pockets, maxBounces);
   }
 
-  // 5.1 准星直射库边时的真实吃库反弹折线模拟 (从库边碰撞点直接向台内推演，保证100%必出反弹折线)
-  function simulateDirectCushionRebound(cuePos, railHit, aimDir, tipOffset, power, verticalAngle, cushionX, cushionY, pockets) {
-    const R = BALL_RADIUS_MM;
-    const maxCenterSpeed = CONFIG.maxCuePowerMmS || 7000;
-    const effPower = Number(power) > 2 ? clamp(Number(power), 2, 100) : 50;
-    const retention = tipSpeedRetention(tipOffset);
-    const elevRetention = resolveV3ElevationRetention(verticalAngle);
-    const initialSpeed = maxCenterSpeed * (effPower / 100) * retention * elevRetention;
-    if (initialSpeed <= 15) return null;
-
-    const hitPt = (railHit && railHit.point) ? railHit.point : (railHit || cuePos);
-    const distMm = Math.hypot(hitPt.x - cuePos.x, hitPt.y - cuePos.y);
-    const rollingDecel = CONFIG.clothRollingDecelMmS2 || 125;
-    // 计算到达库边时的衰减残余动能速度 (保证长距离击打仍能完整展现反弹折线)
-    const vArrival = Math.max(120, Math.sqrt(Math.max(14400, initialSpeed * initialSpeed - 2 * rollingDecel * distMm)));
-
-    // 到达库边时的运动状态 (滚动线速度 + 加塞自旋)
-    const velIn = { x: aimDir.x * vArrival, y: aimDir.y * vArrival };
-    const spinFactor = 2.5 * (CONFIG.cueSpinEfficiency || 0.70);
-    const spinRetention = Math.max(0.35, 1 - 0.00015 * distMm);
-    const omegaIn = {
-      x: -aimDir.y * (vArrival / R),
-      y: aimDir.x * (vArrival / R),
-      z: -(initialSpeed / R) * spinFactor * (tipOffset.x || 0) * spinRetention,
-    };
-
-    // 在库边发生碰撞反弹 (Mathavan 64步动力学冲量积分 + Hermite 恢复系数)
-    const railNorm = (railHit && railHit.normal)
-      ? railHit.normal
-      : (railHit && railHit.axis === 'x' ? { x: aimDir.x > 0 ? -1 : 1, y: 0 } : { x: 0, y: aimDir.y > 0 ? -1 : 1 });
-    const reb = resolvePhysicsCushionRebound(velIn, omegaIn, railNorm);
-
-    // 从库边反弹点向台内追踪反弹折线 (途径2: 原生V3动力学模型移植)
-    const dt = 1 / 120;
-    const maxSteps = 960;
-    let curVel = { ...reb.vel };
-    let curOmega = { ...reb.omega };
-    let curPos = { x: hitPt.x, y: hitPt.y };
-    const cushionPaths = [[{ x: curPos.x, y: curPos.y }]];
-    let travelledMm = 0;
-    const maxPathMm = 400; // 严格对齐游戏原生 predictRebound 400mm 规范
-    let isSliding = true;
-
-    for (let step = 0; step < maxSteps; step++) {
-      const curSpeed = Math.hypot(curVel.x, curVel.y);
-      if (curSpeed < 8 && Math.hypot(curOmega.x, curOmega.y) < 0.25) break;
-
-      if (isSliding) {
-        const slip = {
-          x: curVel.x - curOmega.y * R,
-          y: curVel.y + curOmega.x * R,
-        };
-        const slipSpeed = Math.hypot(slip.x, slip.y);
-        if (slipSpeed <= 2.0) {
-          curOmega.x = -curVel.y / R;
-          curOmega.y = curVel.x / R;
-          isSliding = false;
-        } else {
-          const slipCoupling = 3.5;
-          const slidingAccel = (CONFIG.clothSlidingMu || 0.18) * 9810;
-          const maxLinearChange = Math.min(slidingAccel * dt, slipSpeed / slipCoupling);
-          const deltaVx = -slip.x / slipSpeed * maxLinearChange;
-          const deltaVy = -slip.y / slipSpeed * maxLinearChange;
-          curVel.x += deltaVx;
-          curVel.y += deltaVy;
-          curOmega.x += deltaVy * 2.5 / R;
-          curOmega.y -= deltaVx * 2.5 / R;
-        }
-      } else {
-        const decel = CONFIG.clothRollingDecelMmS2 || 125;
-        const nextSpeed = Math.max(0, curSpeed - decel * dt);
-        if (nextSpeed <= 0) break;
-        const ratio = nextSpeed / curSpeed;
-        curVel.x *= ratio;
-        curVel.y *= ratio;
-        curOmega.x = -curVel.y / R;
-        curOmega.y = curVel.x / R;
-      }
-
-      if (Math.abs(curOmega.z) > 0) {
-        const decay = (CONFIG.clothSideSpinDecelRadS2 || 16) * dt;
-        curOmega.z = Math.sign(curOmega.z) * Math.max(0, Math.abs(curOmega.z) - decay);
-      }
-
-      const nextPos = { x: curPos.x + curVel.x * dt, y: curPos.y + curVel.y * dt };
-      const stepDist = Math.hypot(nextPos.x - curPos.x, nextPos.y - curPos.y);
-
-      if (travelledMm + stepDist >= maxPathMm) {
-        const remain = maxPathMm - travelledMm;
-        const frac = stepDist > 1e-4 ? remain / stepDist : 0;
-        cushionPaths[0].push({
-          x: curPos.x + (nextPos.x - curPos.x) * frac,
-          y: curPos.y + (nextPos.y - curPos.y) * frac,
-        });
-        travelledMm = maxPathMm;
-        break;
-      }
-
-      travelledMm += stepDist;
-
-      let hitRail = false;
-      if (Math.abs(nextPos.x) >= cushionX) {
-        hitRail = true;
-        curPos.x = Math.sign(nextPos.x) * cushionX;
-      }
-      if (Math.abs(nextPos.y) >= cushionY) {
-        hitRail = true;
-        curPos.y = Math.sign(nextPos.y) * cushionY;
-      }
-
-      if (hitRail) {
-        cushionPaths[0].push({ x: curPos.x, y: curPos.y });
-        break; // 严格只计算一库反弹折线
-      } else {
-        curPos = nextPos;
-        if (step % 2 === 0) {
-          cushionPaths[0].push({ x: curPos.x, y: curPos.y });
-        }
-      }
-    }
-
-    const p0 = cushionPaths[0];
-    if (p0.length > 0 && (p0[p0.length - 1].x !== curPos.x || p0[p0.length - 1].y !== curPos.y)) {
-      p0.push({ x: curPos.x, y: curPos.y });
-    }
-    if (p0.length < 2) {
-      p0.push({
-        x: curPos.x + (curVel.x !== 0 ? curVel.x * 0.1 : 1),
-        y: curPos.y + (curVel.y !== 0 ? curVel.y * 0.1 : 1),
-      });
-    }
-
-    return {
-      cuePostPath: null,
-      cueCushionPaths: cushionPaths,
-      path: cushionPaths.flat(),
-      restPos: curPos,
-      method: 'algo',
-    };
-  }
-
-  // 兼容别名 (母球分离走位线已移除，保留接口别名指向吃库反弹求解器)
-  const simulateCuePostPath = simulateDirectCushionRebound;
-  const simulateCuePostAndCushionPaths = simulateDirectCushionRebound;
 
   /* ================================================================== */
   /* v3.4.2 实测动力学模型与能量守恒插值系统                              */
@@ -5221,10 +5082,11 @@
       const railHit = rayRailHit(cue.pos, d, boundX, boundY, pockets);
       const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
 
-      // 【途径1.5 native-local】直接跑本地官方内核 predictRebound，长度可超过官方 400mm
-      const useNativeLocal = CONFIG.reboundMethod === 'native-local';
-      let nativeReb = null;
-      if (useNativeLocal && effPower > 0) {
+      // 母球直射库边：只使用官方内核两库段复算。
+      // 起点 = 第一库接触点；终点 = 反弹后的第二库接触点。
+      if (railHit) result.railHit = railHit;
+      result.noTargetEnd = railHit ? railHit.point : null;
+      if (railHit && effPower > 0) {
         try {
           const rbPayload = engineSim.buildPayload(state, {
             direction: d,
@@ -5243,89 +5105,19 @@
             Math.round(Number(tip && tip.y || 0) * 1000),
             allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
           ].join('|');
-          nativeReb = engineSim.nativeRebound(rbPayload, CONFIG.reboundMaxPathMm, rbKey);
+          const nativeReb = engineSim.nativeTwoRail(rbPayload, rbKey);
+          if (nativeReb) {
+            result.noTargetEnd = nativeReb.path[0];
+            result.cuePost = {
+              cueCushionPaths: [ nativeReb.path ],
+              restPos: nativeReb.path[nativeReb.path.length - 1],
+              nativeLocal: true,
+              travelledMm: nativeReb.travelledMm,
+              secondRailHit: Boolean(nativeReb.secondRailHit),
+            };
+          }
         } catch (err) {
-          devLog('warn', '[反弹] native-local 调用异常', err);
-        }
-      }
-      if (nativeReb) {
-        result.railHit = railHit;
-        // 精度锚定：先用官方 Worker 的 400mm 结果校验 native 复算的前 400mm。
-        // 若偏差超过 3mm，说明本次 payload/物理仍与官方不一致，宁可只画官方
-        // 的 400mm 精确段，也不画一条更长但角度错误的线。
-        let anchorPath = null;
-        try {
-          const wReb = NativeWorkerBridge.latestRebound;
-          const wDir = wReb && wReb.incomingDirection ? V.norm(wReb.incomingDirection) : null;
-          const wFresh = wReb && wReb.hit && Array.isArray(wReb.path) && wReb.path.length >= 2 &&
-            (performance.now() - NativeWorkerBridge.lastReboundTime < 600) &&
-            (!wDir || V.dot(wDir, d) > 0.9995);
-          if (wFresh) {
-            const n400 = engineSim.pathPointAtMm(nativeReb.path, 400);
-            const wEnd = wReb.path[wReb.path.length - 1];
-            const dev = (n400 && wEnd) ? Math.hypot(n400.x - wEnd.x, n400.y - wEnd.y) : Infinity;
-            if (!n400 || dev > 3) anchorPath = wReb.path;
-          }
-        } catch (_) {}
-        if (anchorPath) {
-          result.noTargetEnd = anchorPath[0];
-          result.cuePost = {
-            cueCushionPaths: [ anchorPath ],
-            restPos: anchorPath[anchorPath.length - 1],
-            nativeWorker: true,
-            nativeLocal: true,
-            nativeAnchor: true,
-            travelledMm: 400,
-            method: 'native-anchor',
-          };
-          return result;
-        }
-        result.noTargetEnd = nativeReb.path[0];
-        result.cuePost = {
-          cueCushionPaths: [ nativeReb.path ],
-          restPos: nativeReb.path[nativeReb.path.length - 1],
-          nativeWorker: false,
-          nativeLocal: true,
-          travelledMm: nativeReb.travelledMm,
-          method: 'native-local',
-        };
-        return result;
-      }
-
-      if (CONFIG.reboundMethod === 'worker' || useNativeLocal) {
-        const nReb = NativeWorkerBridge.latestRebound;
-        const now = performance.now();
-        const inDir = (nReb && nReb.incomingDirection) ? V.norm(nReb.incomingDirection) : null;
-        const isRebFresh = nReb && nReb.hit && Array.isArray(nReb.path) && nReb.path.length >= 2 &&
-          (now - NativeWorkerBridge.lastReboundTime < 600) &&
-          (!inDir || V.dot(inDir, d) > 0.85);
-
-        if (isRebFresh) {
-          result.noTargetEnd = nReb.path[0];
-          result.cuePost = {
-            cueCushionPaths: [ nReb.path ],
-            restPos: nReb.path[nReb.path.length - 1],
-            nativeWorker: true,
-            method: 'worker',
-          };
-          return result;
-        }
-      }
-
-      // 途径2 (算法无缝移植) 或 途径1 尚未拦截到 Worker 数据时的无缝回退
-      if (railHit) {
-        result.railHit = railHit;
-        result.noTargetEnd = railHit.point;
-        if (effPower > 0) {
-          result.cuePost = simulateDirectCushionRebound(
-            cue.pos, railHit, d, tip, effPower, vertAngle,
-            boundX, boundY, pockets
-          );
-          if (result.cuePost) {
-            result.cuePost.method = 'algo';
-          }
-        } else {
-          result.cuePost = null;
+          devLog('warn', '[反弹] 官方内核两库复算调用异常', err);
         }
       }
       return result;
@@ -7291,17 +7083,9 @@
             (effPower > 0 && pred.cuePottedWarning) ? '#ff4444' : 'rgba(255, 255, 255, 0.75)'
           );
         } else if (pred.noTargetEnd) {
-          const actualMethod = pred.cuePost && pred.cuePost.method;
-          const methodLabel = actualMethod === 'native-local'
-            ? '途径3:内核'
-            : (actualMethod === 'native-anchor'
-              ? '途径3:锚定'
-              : (actualMethod === 'worker'
-                ? '途径1:拦截'
-                : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植')));
           const cushionName = pred.railHit ? getCushionLabel(pred.railHit.axis, pred.railHit.point) : '库边';
           this.drawTopHudPill(
-            `直吃${cushionName} (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
+            `直吃${cushionName} · 力度 ${effPower}% · ${tipText}`,
             '#86cfff'
           );
         } else {
@@ -8028,140 +7812,6 @@
       row('物理引擎母球走位预测弧线', 'showCuePostTrajectory');
       row('母球吃库反弹折线', 'showCushionRebound');
 
-      // 母球吃库折线计算途径切换 (途径1: 拦截数据 / 途径2: 算法无缝移植)
-      const methodRow = document.createElement('div');
-      methodRow.style.cssText = [
-        'display: flex !important;',
-        'align-items: center !important;',
-        'justify-content: space-between !important;',
-        'margin: 2px 0 6px 20px !important;',
-        'font-size: 11px !important;',
-        'color: #a0c0a8 !important;',
-      ].join(' ');
-
-      const methodLabel = document.createElement('span');
-      methodLabel.textContent = '折线途径:';
-      methodLabel.style.cssText = 'white-space: nowrap !important; margin-right: 6px !important;';
-
-      const segBox = document.createElement('div');
-      segBox.style.cssText = [
-        'display: inline-flex !important;',
-        'background: rgba(0, 0, 0, 0.4) !important;',
-        'border: 1px solid rgba(255, 255, 255, 0.15) !important;',
-        'border-radius: 4px !important;',
-        'padding: 1px !important;',
-        'overflow: hidden !important;',
-      ].join(' ');
-
-      const opt1 = document.createElement('button');
-      opt1.type = 'button';
-      opt1.textContent = '① 拦截';
-      opt1.title = '途径1: 拦截游戏原生Worker计算数据 (高拟真原生，官方截断 400mm)';
-
-      const opt2 = document.createElement('button');
-      opt2.type = 'button';
-      opt2.textContent = '② 算法';
-      opt2.title = '途径2: 无缝移植原生V3动力学模型 (即时零延迟，400mm后为手写近似)';
-
-      const opt3 = document.createElement('button');
-      opt3.type = 'button';
-      opt3.textContent = '③ 内核';
-      opt3.title = '途径3: 本地加载官方 predictRebound + startShot/stepShot 复算，可超过 400mm';
-
-      const applySegStyle = (el, active) => {
-        el.style.cssText = [
-          'border: none !important;',
-          'border-radius: 3px !important;',
-          'padding: 2px 6px !important;',
-          'font-size: 10.5px !important;',
-          `font-weight: ${active ? '700' : '400'} !important;`,
-          'cursor: pointer !important;',
-          `background: ${active ? '#86cfff' : 'transparent'} !important;`,
-          `color: ${active ? '#081726' : '#9bb0a5'} !important;`,
-          'transition: all 0.15s ease !important;',
-          'white-space: nowrap !important;',
-        ].join(' ');
-      };
-
-      const updateSegUI = () => {
-        const m = CONFIG.reboundMethod;
-        applySegStyle(opt1, m === 'worker');
-        applySegStyle(opt2, m === 'algo');
-        applySegStyle(opt3, m === 'native-local');
-      };
-
-      opt1.onclick = (e) => {
-        e.stopPropagation();
-        if (performance.now() < this._suppressClickUntil) return;
-        CONFIG.reboundMethod = 'worker';
-        saveToggles();
-        updateSegUI();
-        showToast('已切换至【途径1: 拦截Worker数据】', 1200);
-      };
-      opt2.onclick = (e) => {
-        e.stopPropagation();
-        if (performance.now() < this._suppressClickUntil) return;
-        CONFIG.reboundMethod = 'algo';
-        saveToggles();
-        updateSegUI();
-        showToast('已切换至【途径2: 移植V3动力学算法】', 1200);
-      };
-      opt3.onclick = (e) => {
-        e.stopPropagation();
-        if (performance.now() < this._suppressClickUntil) return;
-        CONFIG.reboundMethod = 'native-local';
-        saveToggles();
-        updateSegUI();
-        showToast('已切换至【途径3: 本地官方内核复算（可超400mm）】', 1200);
-      };
-
-      updateSegUI();
-      segBox.append(opt1, opt2, opt3);
-      methodRow.append(methodLabel, segBox);
-      this.body.appendChild(methodRow);
-
-      // 反弹折线长度（仅 native-local 生效；官方原版硬截断 400mm）
-      const lenRow = document.createElement('div');
-      lenRow.style.cssText = [
-        'display: flex !important;',
-        'align-items: center !important;',
-        'justify-content: space-between !important;',
-        'margin: 0 0 6px 20px !important;',
-        'font-size: 11px !important;',
-        'color: #a0c0a8 !important;',
-      ].join(' ');
-
-      const lenLabel = document.createElement('span');
-      lenLabel.textContent = '折线长度:';
-      lenLabel.style.cssText = 'white-space: nowrap !important; margin-right: 6px !important;';
-
-      const lenSelect = document.createElement('select');
-      lenSelect.style.cssText = [
-        'background: rgba(0, 0, 0, 0.4) !important;',
-        'color: #cfe8d6 !important;',
-        'border: 1px solid rgba(255, 255, 255, 0.15) !important;',
-        'border-radius: 4px !important;',
-        'font-size: 10.5px !important;',
-        'padding: 1px 4px !important;',
-        'outline: none !important;',
-      ].join(' ');
-      for (const v of [400, 600, 800, 1000, 1200, 1600]) {
-        const opt = document.createElement('option');
-        opt.value = String(v);
-        opt.textContent = `${v}mm`;
-        if (v === Number(CONFIG.reboundMaxPathMm)) opt.selected = true;
-        lenSelect.appendChild(opt);
-      }
-      lenSelect.onclick = (e) => e.stopPropagation();
-      lenSelect.onchange = (e) => {
-        e.stopPropagation();
-        const v = Math.max(400, Math.round(Number(lenSelect.value) || 800));
-        CONFIG.reboundMaxPathMm = v;
-        saveToggles();
-        showToast(`反弹折线长度已设为 ${v}mm`, 1200);
-      };
-      lenRow.append(lenLabel, lenSelect);
-      this.body.appendChild(lenRow);
 
       row('信息浮标', 'showHudPill');
       row('调试信息', 'showDebug');
@@ -8949,8 +8599,6 @@
       resetTurnPowerState,
       extractRawStatePower,
       buildStateKeys,
-      simulateDirectCushionRebound,
-      simulateCuePostPath,
       simulateInstantCuePostTrajectory,
       traceRailReflections,
       tracePhysicsRailReflections,
