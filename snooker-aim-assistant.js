@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.14
+// @version      1.7.15
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.14';
+  const SCRIPT_VERSION = '1.7.15';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -488,8 +488,10 @@
     activeWorker: null,
     latestRebound: null,
     latestAim: null,
+    latestRequest: null,
     lastReboundTime: 0,
     lastAimTime: 0,
+    lastRequestTime: 0,
 
     initWindow(win) {
       if (!win) return;
@@ -518,6 +520,21 @@
       if (urlStr.includes('aim-worker') || urlStr.includes('worker') || !NativeWorkerBridge.activeWorker) {
         NativeWorkerBridge.activeWorker = worker;
       }
+
+      // 捕获游戏发给 Worker 的原始请求载荷：其中的 physicsOverrides 才是
+      // 当前球桌真正使用的物理参数（本地重建的 getParams 可能已被旧配置污染）。
+      try {
+        const origPost = worker.postMessage;
+        worker.postMessage = function (msg, transfer) {
+          try {
+            if (msg && typeof msg === 'object' && msg.payload && msg.payload.shot) {
+              NativeWorkerBridge.latestRequest = msg;
+              NativeWorkerBridge.lastRequestTime = performance.now();
+            }
+          } catch (_) {}
+          return origPost.apply(this, arguments);
+        };
+      } catch (_) {}
 
       worker.addEventListener('message', (ev) => {
         try {
@@ -737,6 +754,49 @@
       return this.params || {};
     },
 
+    // 复用游戏 Worker 最近一次真实反弹请求。它包含当前球桌的内核物理参数、
+    // 精确球位与官方 shot 状态；只要当前瞄准与它一致，直接返回该载荷，
+    // 这样 native-local 复算的入射/反射角与途径1的 Worker 完全同源。
+    compatibleWorkerPayload(state, shot, boundary) {
+      const req = NativeWorkerBridge.latestRequest;
+      const p = req && req.payload;
+      if (!p || !p.shot || !Array.isArray(p.balls)) return null;
+      if (performance.now() - NativeWorkerBridge.lastRequestTime > 1500) return null;
+      if (p.predictionKind !== 'rebound') return null;
+      if (p.tableBoundaryId !== boundary) return null;
+      if ((state.cueBallId || 'cue') !== (p.cueBallId || 'cue')) return null;
+      if (p.balls.length !== (state.balls || []).filter((b) => b && b.pos).length) return null;
+
+      const dir = shot && shot.direction;
+      const wdir = p.shot.direction;
+      if (!dir || !wdir) return null;
+      const dot = V.dot(V.norm(dir), V.norm(wdir));
+      if (!Number.isFinite(dot) || dot < 0.9995) return null;
+
+      const pw = Number(p.shot.power);
+      const pc = Number(shot.power);
+      if (!Number.isFinite(pw) || pw <= 0) return null;
+      if (!Number.isFinite(pc) || Math.abs(pw - pc) > 4) return null;
+
+      const wt = p.shot.tipOffset || { x: 0, y: 0 };
+      const ct = (shot && shot.tip) || { x: 0, y: 0 };
+      if (Math.abs((Number(wt.x) || 0) - (Number(ct.x) || 0)) > 0.08) return null;
+      if (Math.abs((Number(wt.y) || 0) - (Number(ct.y) || 0)) > 0.08) return null;
+      if (Math.abs((Number(p.shot.verticalAngle) || 0) - (Number(shot.verticalAngle) || 0)) > 3) return null;
+
+      const byId = new Map((p.balls || []).map((b) => [b.id, b]));
+      for (const b of state.balls || []) {
+        if (!b || !b.pos) continue;
+        const wb = byId.get(b.id);
+        if (!wb || !wb.pos) return null;
+        if (Math.hypot(b.pos.x - wb.pos.x, b.pos.y - wb.pos.y) > 2) return null;
+        if (Boolean(b.potted) !== Boolean(wb.potted)) return null;
+      }
+
+      // 直接使用官方请求载荷（保留 physicsOverrides/expectedColliderId 等字段）
+      return p;
+    },
+
     buildPayload(state, shot) {
       const api = this.payloadApi();
       const balls = (state.balls || [])
@@ -761,6 +821,9 @@
          window.GAME_CLIENT_CONFIG.physics.settings.tableBoundaryId) ||
         'local-table-892b5cb90e552ac1a09f-pockets-v2';
 
+      const exact = this.compatibleWorkerPayload(state, shot, boundary);
+      if (exact) return exact;
+
       const payloadObj = {
         tableBoundaryId: boundary,
         cueBallId: state.cueBallId || 'cue',
@@ -771,7 +834,19 @@
           tipOffset: { x: shot.tip.x, y: shot.tip.y },
           verticalAngle: shot.verticalAngle || 0,
         },
-        physicsOverrides: this.getParams(),
+        physicsOverrides: (() => {
+          // 优先复用游戏 Worker 最近一次真实请求里的物理参数。
+          // 这是当前球桌的内核参数（含 v3 的库边摩擦/鼻高/回弹），
+          // 比本地 getParams() 重建更可靠，直接决定反弹角是否与官方一致。
+          const req = NativeWorkerBridge.latestRequest;
+          const p = req && req.payload;
+          if (p && p.physicsOverrides &&
+              p.tableBoundaryId === boundary &&
+              (performance.now() - NativeWorkerBridge.lastRequestTime) < 5000) {
+            return p.physicsOverrides;
+          }
+          return this.getParams();
+        })(),
       };
 
       if (api && typeof api.createShotRuntimePayload === 'function') {
@@ -924,6 +999,22 @@
       return fn;
     },
 
+    pathPointAtMm(path, mm) {
+      if (!Array.isArray(path) || path.length < 2) return null;
+      let cum = 0;
+      for (let i = 1; i < path.length; i++) {
+        const p = path[i - 1];
+        const q = path[i];
+        const seg = Math.hypot(q.x - p.x, q.y - p.y);
+        if (cum + seg >= mm) {
+          const f = (mm - cum) / seg;
+          return { x: p.x + (q.x - p.x) * f, y: p.y + (q.y - p.y) * f };
+        }
+        cum += seg;
+      }
+      return null;
+    },
+
     nativeRebound(payload, maxMm, cacheKey) {
       if (!payload) return null;
       const mm = Math.max(400, Math.round(Number(maxMm) || 400));
@@ -937,7 +1028,10 @@
       const mod = this._nativeMod;
       if (!pred || !mod) return null;
       try {
-        const input = mod.createReboundInput(payload, {});
+        const contact = payload.expectedColliderId
+          ? { line: { id: payload.expectedColliderId, role: payload.expectedColliderRole } }
+          : {};
+        const input = mod.createReboundInput(payload, contact);
         const res = pred(input.payload || input);
         if (!res || !res.hit || !Array.isArray(res.path) || res.path.length < 2) return null;
         if (cacheKey) {
@@ -5145,6 +5239,8 @@
             Math.round(cue.pos.x),
             Math.round(cue.pos.y),
             Math.round(vertAngle * 10),
+            Math.round(Number(tip && tip.x || 0) * 1000),
+            Math.round(Number(tip && tip.y || 0) * 1000),
             allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
           ].join('|');
           nativeReb = engineSim.nativeRebound(rbPayload, CONFIG.reboundMaxPathMm, rbKey);
@@ -5154,6 +5250,36 @@
       }
       if (nativeReb) {
         result.railHit = railHit;
+        // 精度锚定：先用官方 Worker 的 400mm 结果校验 native 复算的前 400mm。
+        // 若偏差超过 3mm，说明本次 payload/物理仍与官方不一致，宁可只画官方
+        // 的 400mm 精确段，也不画一条更长但角度错误的线。
+        let anchorPath = null;
+        try {
+          const wReb = NativeWorkerBridge.latestRebound;
+          const wDir = wReb && wReb.incomingDirection ? V.norm(wReb.incomingDirection) : null;
+          const wFresh = wReb && wReb.hit && Array.isArray(wReb.path) && wReb.path.length >= 2 &&
+            (performance.now() - NativeWorkerBridge.lastReboundTime < 600) &&
+            (!wDir || V.dot(wDir, d) > 0.9995);
+          if (wFresh) {
+            const n400 = engineSim.pathPointAtMm(nativeReb.path, 400);
+            const wEnd = wReb.path[wReb.path.length - 1];
+            const dev = (n400 && wEnd) ? Math.hypot(n400.x - wEnd.x, n400.y - wEnd.y) : Infinity;
+            if (!n400 || dev > 3) anchorPath = wReb.path;
+          }
+        } catch (_) {}
+        if (anchorPath) {
+          result.noTargetEnd = anchorPath[0];
+          result.cuePost = {
+            cueCushionPaths: [ anchorPath ],
+            restPos: anchorPath[anchorPath.length - 1],
+            nativeWorker: true,
+            nativeLocal: true,
+            nativeAnchor: true,
+            travelledMm: 400,
+            method: 'native-anchor',
+          };
+          return result;
+        }
         result.noTargetEnd = nativeReb.path[0];
         result.cuePost = {
           cueCushionPaths: [ nativeReb.path ],
@@ -7168,9 +7294,11 @@
           const actualMethod = pred.cuePost && pred.cuePost.method;
           const methodLabel = actualMethod === 'native-local'
             ? '途径3:内核'
-            : (actualMethod === 'worker'
-              ? '途径1:拦截'
-              : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植'));
+            : (actualMethod === 'native-anchor'
+              ? '途径3:锚定'
+              : (actualMethod === 'worker'
+                ? '途径1:拦截'
+                : (CONFIG.reboundMethod === 'worker' ? '途径1:等待' : '途径2:移植')));
           const cushionName = pred.railHit ? getCushionLabel(pred.railHit.axis, pred.railHit.point) : '库边';
           this.drawTopHudPill(
             `直吃${cushionName} (${methodLabel}) · 力度 ${effPower}% · ${tipText}`,
@@ -8838,6 +8966,7 @@
       togglePanelCircleVisibility,
       ui,
       engineSim,
+      NativeWorkerBridge,
       detectCurrentRoomMode,
       extractRawState,
       readState,
