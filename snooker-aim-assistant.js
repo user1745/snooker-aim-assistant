@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.7.9
+// @version      1.7.10
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.7.9';
+  const SCRIPT_VERSION = '1.7.10';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -97,7 +97,7 @@
     panelCollapseKey: 'snooker-aim-assistant-collapse-v1',
     panelCircleHiddenKey: 'snooker-aim-assistant-circle-hidden-v1',
 
-    /* 【每日挑战全自动连打 v1.7.9】
+    /* 【每日挑战全自动连打 v1.7.10】
        进房即自动开局（免点击按钮）→ 清台自动领取 → 自动进入下一关 → 打满 8 关自动停止 */
     dailyAuto: {
       enabled: true,                 // 总开关
@@ -2548,7 +2548,7 @@
   };
 
   /* ================================================================== */
-  /* 【每日挑战全自动连打 v1.7.9】                                        */
+  /* 【每日挑战全自动连打 v1.7.10】                                        */
   /* 入口埋点 → 进房免点击自动开局 → 清台自动领取 → 自动下一关 → 8/8     */
   /* ================================================================== */
 
@@ -2724,6 +2724,8 @@
     _lastSilentClaimAt: 0,
     _driveBusy: false,
     _lobbyTimer: null,
+    _lastList: null,
+    _navTimer: null,
 
     init() {
       const saved = readDailyRunState();
@@ -2749,6 +2751,152 @@
         levelsDone: this.levelsDone,
         ts: Date.now(),
       });
+    },
+
+    isBusy() {
+      try {
+        if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine && DailyChallengeEngine.running) return true;
+      } catch (_) {}
+      return this.phase === 'playing' || this.phase === 'claiming' || this.phase === 'advancing';
+    },
+
+    progressText() {
+      const total = Math.max(1, Number(CONFIG.dailyAuto.totalLevels) || 8);
+      let done = Number(this.levelsDone) || 0;
+      try {
+        const list = getDailyChallengeList();
+        if (list && list.length) done = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
+      } catch (_) {}
+      return done + '/' + total;
+    },
+
+    updatePanel() {
+      try {
+        if (typeof ui !== 'undefined' && ui && typeof ui.updateDailyChallengeBtn === 'function') ui.updateDailyChallengeBtn();
+      } catch (_) {}
+    },
+
+    notify(text, tone, ms) {
+      try {
+        if (typeof ui !== 'undefined' && ui && typeof ui.showDailyMessage === 'function') {
+          ui.showDailyMessage(text, tone || 'info', ms === undefined ? 4000 : ms);
+        }
+      } catch (_) {}
+    },
+
+    async loadActivities() {
+      try {
+        const res = await fetch('/api/product/activities', { credentials: 'include' });
+        if (!res || !res.ok) return null;
+        const data = await res.json();
+        const list = data && Array.isArray(data.challenges) ? data.challenges : null;
+        if (list) {
+          this._lastList = list;
+          const P = getDailyProduct();
+          if (P && data) P.activities = data;
+        }
+        return list;
+      } catch (_) {
+        return null;
+      }
+    },
+
+    async startAutoRun() {
+      if (!CONFIG.dailyAuto.enabled) {
+        this.notify('⚠️ 每日挑战自动化已在配置中关闭（CONFIG.dailyAuto.enabled）', 'warn', 5000);
+        return { ok: false, reason: 'disabled' };
+      }
+      if (window !== window.top) return { ok: false, reason: 'not-top' };
+
+      // 1. 拉取最新进度（优先服务端，失败时回退内存）
+      let list = await this.loadActivities();
+      if (!list || !list.length) list = getDailyChallengeList();
+      if (!list || !list.length) {
+        this.notify('❌ 未读取到每日挑战进度，请确认已登录 147master 账号后重试', 'error', 6000);
+        this.updatePanel();
+        return { ok: false, reason: 'no-progress' };
+      }
+      const total = Math.min(Math.max(1, Number(CONFIG.dailyAuto.totalLevels) || 8), list.length);
+      const claimed = list.filter((c) => dailyStatusOf(c) === 'claimed').length;
+      this.levelsDone = claimed;
+      this.save();
+      this.updatePanel();
+
+      // 2. 已全部完成：只在面板下方提示，不跳转、不进房
+      if (claimed >= total) {
+        this.phase = 'done';
+        this.nextId = null;
+        this.save();
+        this.notify('✅ 今日 ' + claimed + '/' + total + ' 每日挑战已全部完成，无需再打', 'success', 0);
+        try { showToast('🎉 今日每日挑战已全部完成（' + claimed + '/' + total + '）', 3200); } catch (_) {}
+        this.updatePanel();
+        return { ok: true, done: true, claimed, total };
+      }
+
+      // 3. 有已清台但未领取的，先补齐奖励（只调接口，不进房）
+      const completed = list.find((c) => dailyStatusOf(c) === 'completed');
+      if (completed) {
+        const cname = completed.name || completed.id;
+        this.currentId = completed.id;
+        this.nextId = null;
+        this.phase = 'claiming';
+        this.clearAt = Date.now();
+        this._claimFails = 0;
+        this._claimTries = 0;
+        this._lastClaimPollAt = 0;
+        this.save();
+        this.notify('💰 发现已清台未领取「' + cname + '」，正在补齐奖励…', 'info', 4500);
+        this.updatePanel();
+        this.claimReward(completed.id);
+        return { ok: true, claiming: completed.id, claimed, total };
+      }
+
+      // 4. 已经站在挑战房里：原地继续
+      const room = detectDailyChallengeRoom();
+      if (room) {
+        const rname = (room.challenge && room.challenge.name) || room.id;
+        this.currentId = room.id;
+        this.nextId = null;
+        this.phase = 'playing';
+        this.enteredAt = Date.now();
+        this._startAttempted = false;
+        this.shots = 0;
+        this.startedAt = 0;
+        this.clearAt = 0;
+        this.save();
+        this.notify('▶️ 已在「' + rname + '」挑战房，继续自动击球（进度 ' + claimed + '/' + total + '）', 'info', 4500);
+        this.updatePanel();
+        return { ok: true, inRoom: room.id, claimed, total };
+      }
+
+      // 5. 选下一关；大厅由常驻 lobbyTick 驱动，其他页面先回大厅再交给它
+      const next = this.pickNext(list);
+      if (!next) {
+        this.phase = 'done';
+        this.nextId = null;
+        this.save();
+        this.notify('✅ 没有待完成的每日挑战（' + claimed + '/' + total + '）', 'success', 0);
+        this.updatePanel();
+        return { ok: true, done: true, claimed, total };
+      }
+      const nname = next.name || next.id;
+      this.currentId = null;
+      this.nextId = next.id;
+      this.phase = 'advancing';
+      this.clearAt = 0;
+      this.save();
+      this.notify('🚀 已开始自动完成每日挑战：当前 ' + claimed + '/' + total + '，剩余 ' + (total - claimed) + ' 关，正在进入「' + nname + '」', 'success', 5200);
+      this.updatePanel();
+      devLog('info', '[每日挑战] 面板一键启动，下一关', next.id);
+
+      if (!/^\/$/.test(location.pathname)) {
+        if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+        this._navTimer = setTimeout(() => {
+          this._navTimer = null;
+          try { location.href = DAILY_HOME_URL; } catch (_) {}
+        }, 400);
+      }
+      return { ok: true, nextId: next.id, claimed, total };
     },
 
     setPhase(phase, id, resetEntered) {
@@ -2871,8 +3019,10 @@
         DailyChallengeEngine.stop('🎉 每日挑战已清台，进入领取流程');
       }
       showToast('🎉 已清台，正在自动领取奖励...', 1800);
+      this.notify('✅ 已清台：' + ((room.challenge && room.challenge.name) || room.id) + '，正在自动领取奖励…', 'success', 3200);
       devLog('info', '[每日挑战] 清台', room.id);
       this.save();
+      this.updatePanel();
     },
 
     pollClaim(now) {
@@ -2932,6 +3082,18 @@
         this._claimInflight = false;
       }
       await this.refreshActivities();
+      // 领取成功后立刻推进，避免依赖 frame()/tick 才继续（大厅等页面也能走完）
+      if (this.phase === 'claiming') {
+        const ch = findDailyChallengeById(id);
+        if (ch && dailyStatusOf(ch) === 'claimed') {
+          this.levelsDone = this.countClaimed();
+          this.notify('💰 已领取「' + (ch.name || id) + '」，进度 ' + this.progressText(), 'success', 3500);
+          this.updatePanel();
+          this.advance();
+        } else if (status >= 200 && status < 300) {
+          this.notify('💰 领取请求已提交，等待服务端确认「' + (ch ? (ch.name || id) : id) + '」…', 'info', 3000);
+        }
+      }
     },
 
     async refreshActivities() {
@@ -2956,10 +3118,13 @@
     },
 
     advance() {
+      if (this.phase === 'done') return;
+      if (this.phase === 'advancing' && this.nextId) return;
       if (!CONFIG.dailyAuto.autoAdvance) {
         this.phase = 'done';
         this.save();
-        showToast('✅ 已领取本关奖励（自动连打已关闭）', 2200);
+        this.notify('✅ 已领取本关奖励（自动连打已关闭）', 'info', 4000);
+        this.updatePanel();
         return;
       }
       const list = getDailyChallengeList() || [];
@@ -2978,16 +3143,24 @@
         this._claimTries = 0;
         this._lastClaimPollAt = 0;
         this.save();
-        showToast('正在补齐「' + (next.name || next.id) + '」的奖励...', 2200);
+        this.notify('💰 正在补齐「' + (next.name || next.id) + '」的奖励…', 'info', 3500);
+        this.updatePanel();
         this.claimReward(next.id);
         return;
       }
       this.nextId = next.id;
       this.phase = 'advancing';
       this.save();
-      showToast('✅ 已完成 ' + claimed + '/' + CONFIG.dailyAuto.totalLevels + '，前往下一关：' + (next.name || next.id), 2600);
+      this.notify('➡️ 已完成 ' + claimed + '/' + CONFIG.dailyAuto.totalLevels + '，前往下一关：' + (next.name || next.id), 'info', 4200);
+      this.updatePanel();
       devLog('info', '[每日挑战] 下一关', next.id);
-      setTimeout(() => {
+      if (/^\/$/.test(location.pathname)) {
+        // 已经在大厅：不需要刷新页面，交给 lobbyTick 直接点卡片进房
+        return;
+      }
+      if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+      this._navTimer = setTimeout(() => {
+        this._navTimer = null;
         try { location.href = DAILY_HOME_URL; } catch (_) {}
       }, 1400);
     },
@@ -2995,18 +3168,28 @@
     finish() {
       this.phase = 'done';
       this.nextId = null;
+      this.levelsDone = this.countClaimed();
       this.save();
       clearDailyEntryMarker();
       try { if (DailyChallengeEngine.running) DailyChallengeEngine.stop('🎉 8/8 每日挑战全部完成'); } catch (_) {}
       showToast('🎉 每日挑战 8/8 全部完成，已停止自动连打', 3200);
+      this.notify('🎉 今日 8 个每日挑战已全部完成（8/8），自动化已停止', 'success', 0);
+      this.updatePanel();
       devLog('info', '[每日挑战] 8/8 全部完成');
     },
 
     pause(reason) {
       this.phase = 'paused';
+      if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
       this.save();
       if (DailyChallengeEngine.running) DailyChallengeEngine.stop(reason || '已暂停每日挑战自动连打');
-      if (reason) showToast(reason, 2000);
+      if (reason) {
+        showToast(reason, 2000);
+        this.notify('⏸️ ' + reason, 'warn', 5000);
+      } else {
+        this.notify('⏸️ 已暂停自动完成每日挑战（当前进度 ' + this.progressText() + '）', 'warn', 5000);
+      }
+      this.updatePanel();
     },
 
     retryLevel(reason) {
@@ -3033,6 +3216,8 @@
         this.clearAt = 0;
         this.save();
         showToast('🔁 ' + (reason || '本关未能清台') + '，已点击「重打」自动重试第 ' + this._retries + ' 次', 2400);
+        this.notify('🔁 本关未清台，已点击「重打」自动重试（第 ' + this._retries + ' 次）', 'warn', 4000);
+        this.updatePanel();
         devLog('info', '[每日挑战] 点击重打重试本关 ' + id);
         return;
       }
@@ -3041,8 +3226,12 @@
       this.clearAt = 0;
       this.save();
       showToast('🔁 ' + (reason || '本关未能清台') + '，自动重试第 ' + this._retries + ' 次', 2400);
+      this.notify('🔁 ' + (reason || '本关未能清台') + '，自动重试第 ' + this._retries + ' 次', 'warn', 4000);
+      this.updatePanel();
       devLog('info', '[每日挑战] 自动重试本关 ' + id + '（第 ' + this._retries + ' 次）');
-      setTimeout(() => {
+      if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+      this._navTimer = setTimeout(() => {
+        this._navTimer = null;
         try { location.href = DAILY_HOME_URL; } catch (_) {}
       }, 1400);
     },
@@ -3135,29 +3324,33 @@
         try { location.href = DAILY_HOME_URL; } catch (_) {}
         return;
       }
+      if (this.phase !== 'advancing') return;
       const deadline = Date.now() + CONFIG.dailyAuto.advanceLobbyWaitMs;
+      const isDrawerOpen = () => Boolean(document.querySelector('#overlay[data-drawer="training-challenges"]'));
       let card = this.findDailyCard();
-      while (!card && Date.now() < deadline) {
+      while (!card && !isDrawerOpen() && Date.now() < deadline) {
         await dailyDelay(400);
         card = this.findDailyCard();
       }
-      if (!card) { this.pause('未找到大厅「每日挑战」入口'); return; }
-      card.click();
+      if (this.phase !== 'advancing') return;
+      if (!card && !isDrawerOpen()) { this.pause('未找到大厅「每日挑战」入口'); return; }
+      if (!isDrawerOpen()) card.click();
       let btn = this.findChallengeButton(id);
       let tries = 0;
       while (!btn && Date.now() < deadline) {
         await dailyDelay(400);
+        if (this.phase !== 'advancing') return;
         btn = this.findChallengeButton(id);
         tries += 1;
         if (!btn && (tries % 8) === 0) {
-          const drawer = document.querySelector('#overlay[data-drawer="training-challenges"]');
-          if (!drawer) {
+          if (!isDrawerOpen()) {
             const again = this.findDailyCard();
             if (again) again.click();
           }
         }
       }
       if (!btn) { this.pause('未找到可挑战的关卡：' + id); return; }
+      if (this.phase !== 'advancing') return;
       writeDailyEntryMarker(id, '');
       this.currentId = id;
       this.phase = 'playing';
@@ -6893,26 +7086,100 @@
       ].join(' ');
       this.panel.appendChild(this.body);
 
-      // 【每日挑战自动化击球】专属控制按钮 (仅通过按钮或空格键启停)
+      // 【每日挑战自动化】一键完成按钮 + 按钮下方状态提示 (v1.7.10)
       const dailyBtn = document.createElement('button');
       dailyBtn.id = 'snooker-daily-challenge-btn';
       dailyBtn.type = 'button';
       this.dailyChallengeBtn = dailyBtn;
 
+      const dailyMsg = document.createElement('div');
+      dailyMsg.id = 'snooker-daily-status';
+      dailyMsg.style.cssText = [
+        'display: none !important;',
+        'width: 100% !important;',
+        'box-sizing: border-box !important;',
+        'margin: 0 0 8px 0 !important;',
+        'padding: 6px 8px !important;',
+        'border-radius: 6px !important;',
+        'font-size: 11.5px !important;',
+        'line-height: 1.45 !important;',
+        'font-weight: 600 !important;',
+        'text-align: left !important;',
+        'white-space: normal !important;',
+        'word-break: break-all !important;',
+        'border: 1px solid rgba(0, 255, 136, 0.45) !important;',
+        'background: rgba(6, 18, 12, 0.92) !important;',
+        'color: #d9ffe9 !important;',
+        'user-select: none !important;',
+      ].join(' ');
+      this.dailyStatusEl = dailyMsg;
+      this._dailyMsgTimer = null;
+
+      const setImp = (el, prop, value) => {
+        try { el.style.setProperty(prop, value, 'important'); } catch (_) {}
+      };
+
+      this.showDailyMessage = (text, tone, duration) => {
+        if (!this.dailyStatusEl) return;
+        const palette = {
+          info: { border: 'rgba(0, 255, 136, 0.45)', bg: 'rgba(6, 18, 12, 0.92)', fg: '#d9ffe9' },
+          success: { border: 'rgba(0, 255, 136, 0.82)', bg: 'rgba(0, 34, 18, 0.95)', fg: '#c9ffde' },
+          warn: { border: 'rgba(255, 170, 60, 0.72)', bg: 'rgba(32, 23, 6, 0.95)', fg: '#ffe2b0' },
+          error: { border: 'rgba(255, 90, 90, 0.82)', bg: 'rgba(34, 8, 8, 0.95)', fg: '#ffc9c9' },
+        };
+        const c = palette[tone] || palette.info;
+        this.dailyStatusEl.textContent = String(text || '');
+        setImp(this.dailyStatusEl, 'border', '1px solid ' + c.border);
+        setImp(this.dailyStatusEl, 'background', c.bg);
+        setImp(this.dailyStatusEl, 'color', c.fg);
+        setImp(this.dailyStatusEl, 'display', 'block');
+        if (this._dailyMsgTimer) { clearTimeout(this._dailyMsgTimer); this._dailyMsgTimer = null; }
+        const ms = Number(duration);
+        if (ms > 0) {
+          this._dailyMsgTimer = setTimeout(() => {
+            try { if (this.dailyStatusEl) setImp(this.dailyStatusEl, 'display', 'none'); } catch (_) {}
+          }, ms);
+        }
+      };
+
+      this.clearDailyMessage = () => {
+        if (this._dailyMsgTimer) { clearTimeout(this._dailyMsgTimer); this._dailyMsgTimer = null; }
+        if (this.dailyStatusEl) setImp(this.dailyStatusEl, 'display', 'none');
+      };
+
       this.updateDailyChallengeBtn = () => {
         if (!this.dailyChallengeBtn) return;
-        const isRunning = Boolean(typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine && DailyChallengeEngine.running);
-        if (isRunning) {
-          this.dailyChallengeBtn.textContent = '⏸️ 暂停每日挑战自动击球';
+        let engineRunning = false;
+        let phase = 'idle';
+        let progress = '';
+        try {
+          engineRunning = Boolean(typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine && DailyChallengeEngine.running);
+        } catch (_) {}
+        try {
+          if (typeof DailyRunner !== 'undefined' && DailyRunner) {
+            phase = DailyRunner.phase || 'idle';
+            progress = typeof DailyRunner.progressText === 'function' ? DailyRunner.progressText() : '';
+          }
+        } catch (_) {}
+        const busy = engineRunning || phase === 'playing' || phase === 'claiming' || phase === 'advancing';
+        if (busy) {
+          this.dailyChallengeBtn.textContent = '⏸️ 暂停自动化' + (progress ? '（' + progress + '）' : '');
           this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)';
           this.dailyChallengeBtn.style.color = '#ffffff';
           this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(255, 77, 79, 0.5)';
-        } else {
-          this.dailyChallengeBtn.textContent = '🚀 启动每日挑战自动击球';
-          this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #00b05b 0%, #00ff88 100%)';
-          this.dailyChallengeBtn.style.color = '#081726';
-          this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(0, 255, 136, 0.4)';
+          return;
         }
+        if (phase === 'done') {
+          this.dailyChallengeBtn.textContent = '✅ 今日每日挑战已完成';
+          this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #2f6b4f 0%, #3fa878 100%)';
+          this.dailyChallengeBtn.style.color = '#ffffff';
+          this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(63, 168, 120, 0.35)';
+          return;
+        }
+        this.dailyChallengeBtn.textContent = '🚀 开始自动化完成每日挑战';
+        this.dailyChallengeBtn.style.background = 'linear-gradient(135deg, #00b05b 0%, #00ff88 100%)';
+        this.dailyChallengeBtn.style.color = '#081726';
+        this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(0, 255, 136, 0.4)';
       };
 
       dailyBtn.style.cssText = [
@@ -6936,19 +7203,24 @@
       dailyBtn.onclick = (e) => {
         e.stopPropagation();
         e.preventDefault();
-        if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine) {
-          DailyChallengeEngine.toggle();
-        }
         try {
-          if (typeof DailyRunner !== 'undefined' && DailyRunner) {
-            if (DailyChallengeEngine.running) DailyRunner.resume();
-            else DailyRunner.pause('');
+          if (typeof DailyRunner !== 'undefined' && DailyRunner && typeof DailyRunner.startAutoRun === 'function') {
+            if (typeof DailyRunner.isBusy === 'function' && DailyRunner.isBusy()) {
+              DailyRunner.pause('已从面板暂停自动完成每日挑战');
+            } else {
+              Promise.resolve(DailyRunner.startAutoRun()).catch((err) => {
+                try { this.showDailyMessage('启动失败：' + (err && err.message ? err.message : err), 'error', 5000); } catch (_) {}
+              });
+            }
+          } else if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine) {
+            DailyChallengeEngine.toggle();
           }
         } catch (_) {}
         this.updateDailyChallengeBtn();
       };
       this.updateDailyChallengeBtn();
       this.body.appendChild(dailyBtn);
+      this.body.appendChild(dailyMsg);
 
       // 【真实走位 vs 蓝色落位预测线】轨迹对比记录与导出按钮组 (v1.7.7)
       const recordRow = document.createElement('div');
@@ -7699,7 +7971,7 @@
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
 
-      // 【每日挑战全自动 v1.7.9】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
+      // 【每日挑战全自动 v1.7.10】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
       try {
         if (typeof DailyRunner !== 'undefined' && DailyRunner) {
           DailyRunner.tick(rawState, { isPlayable, inLobby, isSettlement, isLoading, hasCanvas });
