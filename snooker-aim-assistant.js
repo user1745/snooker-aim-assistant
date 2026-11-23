@@ -2981,7 +2981,7 @@
 
         // 5. 保护：正在普通对局/练球房时不要跳转，避免把当前球局丢掉
         const ctx = this.lastCtx || {};
-        if (ctx.isPlayable && !ctx.inLobby) {
+        if (!ctx.inLobby && (ctx.isPlayable || ctx.hasCanvas)) {
           this.notify('⚠️ 当前正在球桌中（非每日挑战房），请先返回大厅再启动自动完成', 'warn', 6000);
           this.updatePanel();
           return { ok: false, reason: 'in-table' };
