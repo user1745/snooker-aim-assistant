@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.8.6
+// @version      1.8.7
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.8.6';
+  const SCRIPT_VERSION = '1.8.7';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -4780,6 +4780,45 @@
     return { vel: newVel, omega: newOmega };
   }
 
+  // 目标球第一库之后的几何反弹：从接触点按库边法线反射，继续追踪到下一库或袋口。
+  // 物理追踪没有生成有效后续段时，用它保证目标球吃库后仍有可见、真实的反弹折线。
+  function reflectRailDirection(dir, axis, point) {
+    const d = V.norm(dir);
+    if (!d || !Number.isFinite(d.x) || !Number.isFinite(d.y)) return null;
+    let nx = 0;
+    let ny = 0;
+    if (axis === 'x') {
+      nx = point.x >= 0 ? -1 : 1;
+    } else if (axis === 'y') {
+      ny = point.y >= 0 ? -1 : 1;
+    } else {
+      return null;
+    }
+    const dot = d.x * nx + d.y * ny;
+    return V.norm({ x: d.x - 2 * dot * nx, y: d.y - 2 * dot * ny });
+  }
+
+  function traceTargetCushionReboundSegments(firstHit, incomingDir, cushionX, cushionY, pockets, maxBounces = 2) {
+    const segments = [];
+    if (!firstHit || !firstHit.point || (firstHit.axis !== 'x' && firstHit.axis !== 'y')) return segments;
+    let pos = { ...firstHit.point };
+    let dir = reflectRailDirection(incomingDir, firstHit.axis, firstHit.point);
+    if (!dir) return segments;
+
+    for (let b = 0; b < maxBounces; b++) {
+      const next = rayRailHit(pos, dir, cushionX, cushionY, pockets);
+      if (!next || !next.point) break;
+      const length = Math.hypot(next.point.x - pos.x, next.point.y - pos.y);
+      if (!(length > 0.5)) break;
+      segments.push({ from: { ...pos }, to: { ...next.point }, axis: next.axis });
+      if (next.axis === 'jaw') break;
+      dir = reflectRailDirection(dir, next.axis, next.point);
+      if (!dir) break;
+      pos = { ...next.point };
+    }
+    return segments;
+  }
+
   // 4. 真实物理反弹追踪（综合入杆力度、切球衰减、旋转与吃库冲量积分）
   function tracePhysicsRailReflections(startPos, initialVel, initialOmega, cushionX, cushionY, pockets, maxBounces = 2) {
     const segments = [];
@@ -5212,10 +5251,17 @@
           );
           // v1.8.6：tracePhysicsRailReflections 的第 0 段是 targetBall.pos -> 第一库接触点
           // 的入射段，和绿色 objectPath 完全重合；真正的目标球反弹折线从第一库之后开始。
-          reboundSegments = (fullReboundSegments || []).slice(1).filter((seg) => {
+          const physicalPostSegments = (fullReboundSegments || []).slice(1).filter((seg) => {
             if (!seg || !seg.from || !seg.to) return false;
             return Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y) > 0.5;
           });
+          // v1.8.7：物理追踪在部分直撞库/低能量场景只返回入射段，无法给出后续反弹。
+          // 这时从第一库接触点按库边法线做几何反射，补齐真正的目标球反弹折线。
+          reboundSegments = physicalPostSegments.length
+            ? physicalPostSegments
+            : traceTargetCushionReboundSegments(
+                railHit, n, cushionX, cushionY, pockets, CONFIG.maxRebounds || 2
+              );
         }
       } else {
         objectEnd = V.add(targetBall.pos, V.scale(n, 2000));
@@ -7259,7 +7305,17 @@
             ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
-            ctx.setLineDash([]);
+            // 垂直撞库时，真实反弹方向与绿色入射线共线；用虚线区分“回弹方向”，
+            // 避免又出现一条实线蓝线看起来像在覆盖绿色瞄准线。
+            let collinearRebound = false;
+            if (t && t.ball && t.objectDir && t.reboundSegments[0]) {
+              const r = V.norm(V.sub(t.reboundSegments[0].to, t.reboundSegments[0].from));
+              const o = V.norm(t.objectDir);
+              const cross = Math.abs(o.x * r.y - o.y * r.x);
+              const dot = V.dot(o, r);
+              collinearRebound = cross < 0.04 && dot < -0.7;
+            }
+            ctx.setLineDash(collinearRebound ? [5, 4] : []);
             ctx.beginPath();
             for (const reboundSeg of reboundProj.segments) {
               ctx.moveTo(reboundSeg[0].x, reboundSeg[0].y);
