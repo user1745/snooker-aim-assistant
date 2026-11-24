@@ -1727,6 +1727,9 @@
   let _lastRequestedShotPower = null;
   let _lastRequestedShotAt = 0;
   let _lastAimPowerObserved = null;
+  // 本杆真实出杆力度：停球后作为下一杆的“旧力度基准”，
+  // 防止游戏把上一杆力度回填到 state.power/aim.power 时误触发辅助线。
+  let _lastShotPowerForTurn = null;
   let _lastActualAimPred = null;
 
   function extractRawStatePower(state) {
@@ -1751,21 +1754,37 @@
     _turnPowerActive = false;
     _settledRawPower = null;
     _turnHasInteracted = false;
+    _lastShotPowerForTurn = null;
+    resetShotPowerFallbacks();
+  }
+
+  // 清空只属于“上一杆”的力度兜底数据，避免下一杆快照在 state 力度缺失时
+  // 误用上一杆的静态预测/观察力度，把旧的辅助线与 HUD 力度一起冻结进来。
+  function resetShotPowerFallbacks() {
+    _lastActualAimPred = null;
+    _lastAimPowerObserved = null;
+    _lastRequestedShotPower = null;
+    _lastRequestedShotAt = 0;
+  }
+
+  // 停球后的力度基准：优先使用本杆真实出杆力度。
+  // 不能直接用停球瞬间的 state 力度，因为很多情况下它已经被游戏清零，
+  // 之后又把上一杆力度回填，导致下一杆一开局就误判为“玩家已蓄力”。
+  function resolveSettledPowerBaseline(state) {
+    const candidates = [
+      _lastShotPowerForTurn,
+      _lastAimPowerObserved,
+      (performance.now() - _lastRequestedShotAt < 1500) ? _lastRequestedShotPower : null,
+    ];
+    for (const raw of candidates) {
+      const p = Number(raw);
+      if (Number.isFinite(p) && p > 2) return clamp(p, 0, 100);
+    }
+    return extractRawStatePower(state);
   }
 
   function resolveEffectivePower(state) {
     if (!state) return 0;
-
-    // 1. 若游戏自带实时 state.power 字段（未出杆/未拉杆时为 0），以物理交互层为准
-    if (state.power != null && Number.isFinite(Number(state.power))) {
-      const p = Number(state.power);
-      if (p <= 0) {
-        _turnPowerActive = false;
-        return 0;
-      }
-      _turnPowerActive = true;
-      return clamp(p, 0, 100);
-    }
 
     const raw = extractRawStatePower(state);
     if (raw == null || raw <= 0) {
@@ -1773,18 +1792,20 @@
       return 0;
     }
 
-    // 2. 若 state.power 缺失，通过与刚停球结算时的残留数值比对，判定是否已开始拉杆交互
+    // 首次进入球桌 / 重置后没有历史基准：按真实力度处理。
+    if (_settledRawPower === null) {
+      _turnPowerActive = true;
+      return clamp(raw, 0, 100);
+    }
+
+    // 停球后游戏可能把上一杆的出杆力度回填到 state.power / aim.power / shot.power。
+    // 在玩家真正改变力度之前，这个值不是本杆蓄力，不能点亮辅助线或 HUD 力度。
+    // 力度显示按整数百分比使用，留 1% 容差吸收游戏回填时的四舍五入差异。
     if (!_turnHasInteracted) {
-      if (_settledRawPower === null) {
-        // 刚进入球桌或刚停球静止：记录残留力度基准，默认未拉杆显示 0%
-        _settledRawPower = raw;
+      if (Math.abs(raw - _settledRawPower) < 1.0) {
+        _turnPowerActive = false;
         return 0;
       }
-      // 数值与上一杆残留完全一致，玩家尚未开始拉杆
-      if (Math.abs(raw - _settledRawPower) < 0.1) {
-        return 0;
-      }
-      // 数值改变，玩家已开始拉杆蓄力！
       _turnHasInteracted = true;
       _turnPowerActive = true;
     }
@@ -10572,14 +10593,21 @@
       const shot = isShotOrMoving(state);
       const still = ballsActuallyStill(state);
       if (!shot) {
-        // 静态瞄准阶段持续记住玩家实际拉到的力度；出杆瞬间 state.power 可能被清 0。
-        const observedPower = extractRawStatePower(state);
-        if (Number.isFinite(Number(observedPower)) && Number(observedPower) > 2) {
-          _lastAimPowerObserved = clamp(Number(observedPower), 0, 100);
+        // 只记录玩家真正交互后的力度；停球后游戏回填的上一杆旧力度会被 gate 成 0，
+        // 不能让它污染下一杆的快照兜底力度。
+        const observedPower = resolveEffectivePower(state);
+        if (observedPower > 2) {
+          _lastAimPowerObserved = clamp(observedPower, 0, 100);
         }
       }
 
       if (shot || (_wasInShot && !still) || _shotMotionLocked) {
+        // 出杆运动阶段持续清空“本杆蓄力”状态；必须在 buildShotSnapshotPrediction 之前重置，
+        // 否则上一杆停球基准会把本杆真实力度 gate 成 0，导致冻结快照按 0% 推演。
+        _turnPowerActive = false;
+        _turnHasInteracted = false;
+        _settledRawPower = null;
+
         if (!_wasInShot) {
           // 本杆刚刚触发击球出杆！用实际出杆力度重建一次预测并冻结，
           // 其中目标球吃库线使用冻结快照；白线/绿线按实时球位擦除，
@@ -10591,6 +10619,8 @@
           // v1.9.9：下一杆出杆瞬间先清掉上一杆的目标球反弹冻结线，再建立本杆快照。
           // 这样旧线严格在“下一杆出杆”这一帧消失，而不是停球后再被新瞄准线覆盖。
           clearRetainedShotPrediction();
+          // 先清空上一杆的力度基准，避免本杆力度缺失时把上一杆的值继续当成本杆。
+          _lastShotPowerForTurn = null;
           const shotSnapshot = buildShotSnapshotPrediction(state);
           const retainedSource = shotSnapshot || _lastActualAimPred || _lastFullPred || _lastShotPred || _lastCueCushionPred;
           _retainedShotPred = freezeRetainedPrediction(
@@ -10599,13 +10629,21 @@
           // v1.9.12：母球吃库反弹折线同样在出杆这一帧定格；
           // 若快照为空则退回本杆实际来源，绝不使用之后重新预测的路径。
           retainCueCushionPath(_retainedShotPred || retainedSource);
+          // 记录本杆真实出杆力度，停球后作为下一杆的旧力度基准。
+          const retainedPower = Number(
+            _retainedShotPred && _retainedShotPred.shot && _retainedShotPred.shot.power != null
+              ? _retainedShotPred.shot.power
+              : (_retainedShotPred && _retainedShotPred.power)
+          );
+          const fallbackShotPower = Number(resolveShotSnapshotPower(state));
+          const gatePower = (Number.isFinite(retainedPower) && retainedPower > 2)
+            ? retainedPower
+            : (Number.isFinite(fallbackShotPower) && fallbackShotPower > 2 ? fallbackShotPower : null);
+          if (gatePower != null) _lastShotPowerForTurn = clamp(gatePower, 0, 100);
           if (typeof TrajectoryRecorder !== 'undefined') {
             TrajectoryRecorder.onShotStart(state, _retainedShotPred || retainedSource);
           }
         }
-        _turnPowerActive = false;
-        _turnHasInteracted = false;
-        _settledRawPower = null;
         if (!_shotHiddenSince) _shotHiddenSince = performance.now();
         const now = performance.now();
         const forceShow = configChanged || now < _forceShowUntil;
@@ -10635,7 +10673,9 @@
           resetTargetMotionState();
           resetCueMotionState();
           _lastRenderKey = null;
-          _settledRawPower = extractRawStatePower(state);
+          _settledRawPower = resolveSettledPowerBaseline(state);
+          // 本杆已结束：清掉上一杆的力度兜底，下一杆必须重新观测/重建。
+          resetShotPowerFallbacks();
         } else {
           // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
           _shotMotionLocked = true;
@@ -10652,6 +10692,8 @@
             resetTargetMotionState();
             resetCueMotionState();
             overlay.clear();
+            _settledRawPower = resolveSettledPowerBaseline(state);
+            resetShotPowerFallbacks();
           } else if (!forceShow) {
             if (typeof TrajectoryRecorder !== 'undefined') {
               TrajectoryRecorder.onFrame(state);
@@ -10713,11 +10755,18 @@
           resetTargetMotionState();
           resetCueMotionState();
           _lastRenderKey = null;
+          // 弃用本杆的动态预测缓存；下一杆静态帧必须按新的门槛力度重新预测，
+          // 不能复用带上一杆力度的 _lastFullPred / _lastGeomPred。
+          _lastGeomPred = null;
+          _lastGeomKey = null;
+          _lastFullPred = null;
           // 不清理 _retainedShotPred，也不 overlay.clear()：仅目标球吃库线冻结保留到下一杆。
           // 白线、绿线、母球吃库线、落位线不再从冻结层绘制，全台停球后即消失。
           _turnPowerActive = false;
           _turnHasInteracted = false;
-          _settledRawPower = extractRawStatePower(state);
+          _settledRawPower = resolveSettledPowerBaseline(state);
+          // 本杆已结束：清掉上一杆的力度兜底，下一杆必须重新观测/重建。
+          resetShotPowerFallbacks();
         }
         _shotHiddenSince = 0;
       }
