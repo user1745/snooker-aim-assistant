@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.8.3
+// @version      1.8.4
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.8.3';
+  const SCRIPT_VERSION = '1.8.4';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -5954,6 +5954,7 @@
   let _cueCushionCompleted = false;
   let _cueCushionEngaged = false;
   let _cueCushionMaxTravel = 0;
+  let _lastCueCushionPred = null;
   let _trackedTargetBallId = null;
   let _trackedTargetPos = null;
 
@@ -8431,6 +8432,7 @@
         _shotMotionLocked = false;
         _wasInShot = false;
         _lastShotPred = null;
+        _lastCueCushionPred = null;
       }
 
       const state = (hasCanvas && (!inLobbyOrSettlementOrLoading || _shotMotionLocked)) ? rawState : null;
@@ -8454,6 +8456,7 @@
         _lastRenderKey = null;
         _lastFullPred = null;
         _lastShotPred = null;
+        _lastCueCushionPred = null;
         _wasInShot = false;
         _shotMotionLocked = false;
         _shotHiddenSince = 0;
@@ -8520,6 +8523,7 @@
           _shotMotionLocked = false;
           _wasInShot = false;
           _lastShotPred = null;
+        _lastCueCushionPred = null;
           _shotHiddenSince = 0;
           resetTargetMotionState();
           resetCueMotionState();
@@ -8536,6 +8540,7 @@
             _shotMotionLocked = false;
             _wasInShot = false;
             _lastShotPred = null;
+        _lastCueCushionPred = null;
             _shotHiddenSince = 0;
             resetTargetMotionState();
             resetCueMotionState();
@@ -8545,7 +8550,12 @@
               TrajectoryRecorder.onFrame(state);
             }
             // 出杆击球走位中：母球走位预测线持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
-            const predToDraw = _lastShotPred || _lastFullPred;
+            const basePred = _lastShotPred || _lastFullPred;
+            const predToDraw = (basePred && basePred.cuePost)
+              ? basePred
+              : ((!_lastCueCushionPred || (basePred && basePred.target))
+                ? basePred
+                : _lastCueCushionPred);
             if (predToDraw) {
               overlay.drawPrediction(predToDraw, state?.balls, true /* inMotion */);
               if (DailyChallengeEngine.running) {
@@ -8573,6 +8583,7 @@
           _wasInShot = false;
           _shotMotionLocked = false;
           _lastShotPred = null;
+        _lastCueCushionPred = null;
           resetTargetMotionState();
           resetCueMotionState();
           _lastRenderKey = null;
@@ -8623,6 +8634,9 @@
         if (isDifferentAim || hasValidTrajectory || hasCushionPath || curPower > 2 || !_lastShotPred || !Array.isArray(_lastShotPred.cuePostTrajectory)) {
           _lastShotPred = pred;
         }
+        // 吃库折线单独留一份快照：避免出杆后主预测被刷新成没有 cuePost 的版本，
+        // 导致白线还在擦除、蓝线却因为找不到路径直接消失。
+        if (hasCushionPath) _lastCueCushionPred = pred;
       }
       _lastConfigVersion = _configVersion;
       _sizesDirty = false;
