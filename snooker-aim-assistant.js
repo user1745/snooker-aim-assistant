@@ -5544,12 +5544,12 @@
    * 解法：不动物理常数（会影响推荐力度、力度不足判定、母球到达速度等下游），
    * 只在显示层按「当前力度真正能把目标球推多远」做截断。
    *
-   * 精度校准：旧版固定 transferEff=0.88 低估了碰撞传递效率；现在按官方恢复系数
-   * 计算等质量正碰后的目标球速度比 (1+e)/2，并把母球剩余自由行程与目标球速度
-   * 都通过 CUE_POWER_CURVE 反查/正查，吸收高力度段的滑-滚转换非线性。
+   * 精度策略：本函数是官方引擎不可用时的兜底经验模型；
+   * 正式显示优先使用 engineSim 官方微模拟返回的 targetPath 总长度（见 predict()），
+   * 因为官方引擎会真实计算碰后速度、滑-滚转换、库边/球体碰撞与最终停点。
    *
-   * attachShotPowerMetrics() 的 actualReachMm 直接调用本函数，保证
-   * 「蓝线长度」「橙色实线力度条」「力度不足判定」永远用同一套口径。
+   * attachShotPowerMetrics() 的 actualReachMm 也优先取官方引擎结果，
+   * 仅在引擎未就绪时回退到本函数。
    *
    * @param {number} power       当前有效力度 0~100
    * @param {{x:number,y:number}} tip 杆法偏移
@@ -5575,6 +5575,9 @@
     const kSidespin = 1.0 - 0.10 * (sideRatio * sideRatio);
     const spinDynamicRetention = Math.max(0.40, kBackspin * kSidespin);
 
+    // 碰撞瞬间传递给目标球的正向冲量折减（兜底经验值；官方引擎可用时不走这里）
+    const transferEff = 0.88 * (1.0 - 0.10 * backspinRatio);
+
     const retention = tipSpeedRetention(tip) * resolveV3ElevationRetention(verticalAngle);
     const totalCueTravel = cueTravelByPower(p, retention) * spinDynamicRetention;
     // 母球滚到接触点途中被逆旋滑移额外吃掉的部分（等效行程损耗放大 2.7 倍）
@@ -5582,27 +5585,8 @@
     const remainCueTravel = Math.max(0, totalCueTravel - sCueLoss);
     if (remainCueTravel <= 0) return 0;
 
-    // 目标球碰后法向速度由等质量正碰恢复系数决定：v_target = v_cue * (1+e)/2。
-    // 旧版固定 transferEff=0.88 明显低估官方 e≈0.95 时的传递效率（(1+e)/2≈0.975，
-    // 行程按速度平方折算应约 0.95），这是橙条终点偏近、目标球多跑一段的主因。
-    const livePhy = getLivePhysicsOverrides();
-    const eRaw = Number(livePhy && livePhy.ballNormalRestitution);
-    const e = clamp(Number.isFinite(eRaw) ? eRaw : CONFIG.ballRestitution, 0, 1);
-    const collisionSpeedFactor = (1 + e) * 0.5;
-
     const cc = clamp(Number.isFinite(Number(cosCut)) ? Number(cosCut) : 1, 0.08, 1);
-
-    // CUE_POWER_CURVE 是官方引擎实测的「力度→自由行程」曲线，天然包含滑-滚转换
-    // 与台呢阻力的非线性。这里不假设恒定减速度，而是：
-    // 1) 把母球剩余自由行程反查成等效力度，得到碰球瞬间速度；
-    // 2) 乘上碰撞速度比与切角余弦，得到目标球碰后初速；
-    // 3) 再用同一条实测曲线反查目标球可走距离。
-    // 这样既修正了 transferEff 的系统性低估，也吸收了高力度段曲线的非线性。
-    const cuePowerAtContact = powerByCueTravel(remainCueTravel);
-    const cueSpeedAtContact = resolveCueSpeed(cuePowerAtContact);
-    const targetSpeed = cueSpeedAtContact * collisionSpeedFactor * cc;
-    const targetPowerEquiv = 100 * targetSpeed / Math.max(1, Number(CONFIG.maxCuePowerMmS) || 7000);
-    return Math.max(0, cueTravelByPower(targetPowerEquiv));
+    return Math.max(0, remainCueTravel * cc * cc * transferEff);
   }
 
   /**
@@ -6238,6 +6222,20 @@
     }
     result.engineSim = engine;
 
+    // 【精度优先】官方引擎的 targetPath 是目标球碰后到真实停点的完整逐帧轨迹。
+    // 用它的总长度作为目标球行程预算，直接复用官方碰后速度、滑-滚转换与库边/球体
+    // 碰撞结果，避免本地经验公式在不同力度下出现“有时多跑、有时少跑”的双向误差。
+    // stale 结果是上一力度/上几帧的缓存，不用于停点判断，继续走本文件兜底模型。
+    let engineTargetReachMm = null;
+    if (engine && engine.hit && !engine.stale &&
+        Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
+      const engineTravelMm = polylineLength(engine.targetPath);
+      if (Number.isFinite(engineTravelMm) && engineTravelMm > 0) {
+        engineTargetReachMm = engineTravelMm;
+        targetTravelBudgetMm = engineTravelMm;
+      }
+    }
+
     if (engine) {
       if (engine.hit === false) {
         result.unreachable = true;
@@ -6399,15 +6397,19 @@
       reboundBudgetTrimmedMm,
       reboundBudgetLimited,
       pathLengthMm: polylineLength(verts),
-      // 橙色实线力度条使用的目标球行程预算；出杆冻结快照也要带着它，
-      // 否则运动阶段无法继续绘制并按实时球位擦除橙条。
-      targetReachMm: computeTargetTravelBudgetMm(
-        effPower,
-        tip,
-        Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5),
-        V.dist(cue.pos, G),
-        clamp(V.dot(d, n), 0.08, 1)
-      ),
+      // 橙色实线力度条使用的目标球行程预算；出杆冻结快照也要带着它。
+      // 优先官方引擎 targetPath 总长度；引擎不可用/结果 stale 时回退经验模型。
+      targetReachMm: Number.isFinite(Number(engineTargetReachMm)) && Number(engineTargetReachMm) > 0
+        ? Number(engineTargetReachMm)
+        : (Number.isFinite(Number(targetTravelBudgetMm)) && Number(targetTravelBudgetMm) > 0
+          ? Number(targetTravelBudgetMm)
+          : computeTargetTravelBudgetMm(
+            effPower,
+            tip,
+            Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5),
+            V.dist(cue.pos, G),
+            clamp(V.dot(d, n), 0.08, 1)
+          )),
       source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
       cushionHug: pocket?.cushionHug || checkCushionHug(targetBall.pos, tableBoundsObj),
     };
@@ -6435,8 +6437,11 @@
       const sCue = V.dist(geomPred.cue, geomPred.target.contact || geomPred.target.ball.pos);
       const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
 
-      // 与蓝线预算、橙色力度条共用同一套「力度-行程」模型，避免显示与判定口径分叉。
-      actualReachMm = computeTargetTravelBudgetMm(power, tip, vertAngle, sCue, cosCut);
+      // 官方引擎已经给出目标球真实停点时，直接采用；否则回退经验模型。
+      const engineReachMm = Number(geomPred.target && geomPred.target.targetReachMm);
+      actualReachMm = (Number.isFinite(engineReachMm) && engineReachMm > 0)
+        ? engineReachMm
+        : computeTargetTravelBudgetMm(power, tip, vertAngle, sCue, cosCut);
 
       const targetPathLen = Number(geomPred.target.pathLengthMm) ||
         (geomPred.target.pocket ? V.dist(geomPred.target.ball.pos, geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : 0);
