@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.13
+// @version      1.9.14
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.13';
+  const SCRIPT_VERSION = '1.9.14';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -98,6 +98,13 @@
     targetMicroDtMs: 0.65,
     // v1.9.8：单次目标球微模拟最多覆盖约 2.5 张台面长度；不再允许 18m 异常长路径。
     targetMaxPathMm: 9000,
+    // v1.9.14：目标球吃库反弹线要画到真实停点，而不是在第二库直接截断。
+    // 单独放开显示库数与路径上限，不影响母球/其他预测的 maxRebounds。
+    targetRestBounces: 5,
+    targetRestMaxPathMm: 15000,
+    // v1.9.14：显示路径要覆盖慢速收尾阶段；只提高目标球显示推演的步数上限，
+    // 不改动其他预测的采样预算。
+    targetRestMaxSteps: 18000,
     targetMaxSteps: 9000,
     // 目标球反弹线绘制：按距离采样后投影，避免整条跨台长段被 projectPolyline 丢弃或拉出屏幕。
     targetReboundSampleStepMm: 50,
@@ -5242,6 +5249,8 @@
     let railCount = 0;
     let travelled = 0;
     let terminal = null;
+    let stopReason = null;
+    let restExact = false;
     let hitPocket = false;
     let hitBall = null;
 
@@ -5253,7 +5262,11 @@
 
     for (let step = 0; step < maxSteps; step++) {
       const speed = Math.hypot(ball.vel.x, ball.vel.y);
-      if (speed <= Math.max(8, Number(opts.lowSpeedCutoff) || 8)) break;
+      if (speed <= Math.max(8, Number(opts.lowSpeedCutoff) || 8)) {
+        stopReason = 'low-speed';
+        restExact = true;
+        break;
+      }
 
       const dir = { x: ball.vel.x / speed, y: ball.vel.y / speed };
       const railHit = rayRailHit(pos, dir, cushionX, cushionY, pockets);
@@ -5279,6 +5292,7 @@
         if (ballHit && ballT <= railT) {
           hitBall = ballHit.ball || true;
           terminal = { x: pos.x, y: pos.y };
+          stopReason = 'hit-ball';
           if (firstRailHit) pushSegment(lastRailPoint, terminal, null);
           break;
         }
@@ -5287,6 +5301,7 @@
           if (railHit.axis === 'jaw') {
             hitPocket = true;
             terminal = { x: pos.x, y: pos.y };
+            stopReason = 'pocket';
             if (firstRailHit) pushSegment(lastRailPoint, terminal, 'jaw');
             break;
           }
@@ -5313,6 +5328,7 @@
           const rebound = resolvePhysicsCushionRebound(ball.vel, ball.omega, normal);
           if (!rebound || !rebound.vel || !Number.isFinite(rebound.vel.x) || !Number.isFinite(rebound.vel.y)) {
             terminal = { x: pos.x, y: pos.y };
+            stopReason = 'rebound-failed';
             break;
           }
           ball.vel = rebound.vel;
@@ -5321,12 +5337,14 @@
 
           if (railCount >= 1 + maxBounces) {
             terminal = { x: pos.x, y: pos.y };
+            stopReason = 'max-bounce';
             break;
           }
           continue;
         }
 
         terminal = { x: pos.x, y: pos.y };
+        stopReason = 'stop-limit';
         break;
       }
 
@@ -5336,11 +5354,15 @@
 
       if (travelled >= maxPathMm) {
         terminal = { x: pos.x, y: pos.y };
+        stopReason = 'max-path';
         break;
       }
     }
 
-    if (!terminal) terminal = { x: pos.x, y: pos.y };
+    if (!terminal) {
+      terminal = { x: pos.x, y: pos.y };
+      stopReason = stopReason || 'max-steps';
+    }
     // 目标球停在两库之间时，把最后一段补到终点，避免折线在库边半截断掉。
     if (firstRailHit && !hitPocket && !hitBall && lastRailPoint) {
       const hasEndpoint = segments.length > 0
@@ -5362,11 +5384,24 @@
       x: clamp(terminal.x, -cushionX, cushionX),
       y: clamp(terminal.y, -cushionY, cushionY),
     };
+    const displayLengthMm = safeSegments.reduce((sum, seg) => {
+      return sum + Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y);
+    }, 0);
+    const truncated = ['max-bounce', 'max-path', 'max-steps', 'rebound-failed', 'stop-limit']
+      .includes(stopReason);
 
     return {
       segments: safeSegments,
+      // v1.9.14：绘制层使用的“第一库之后到真实停点”的路径。
+      // 与 segments 保持同一份数据，后续如需单独裁剪只改这个字段。
+      displaySegments: safeSegments,
+      displayLengthMm,
       firstRailHit,
       terminal: safeTerminal,
+      restPoint: safeTerminal,
+      restExact: Boolean(restExact && !truncated),
+      stopReason,
+      truncated,
       bounces: firstRailHit ? railCount : 0,
       hitPocket,
       hitBall,
@@ -5749,6 +5784,10 @@
     // 优先采用原生引擎预计算的 targetPath，若无则严格使用质心连心线几何法向 (targetBall.pos - G)
     let objectEnd = null;
     let reboundSegments = null;
+    let reboundDisplaySegments = null;
+    let reboundRestPoint = null;
+    let reboundRestExact = false;
+    let reboundStopReason = null;
     let targetReboundMeta = null;
     // v1.9.8 调试字段：记录本次目标球反弹线为什么生成/为什么没有生成。
     const targetReboundDebug = {
@@ -5843,7 +5882,10 @@
                   // 目标球回弹时，母球已到达接触点 G；用 G 而不是出杆前
                   // 的母球位置当回弹障碍，否则会把折线截得过短。
                   lateCueBall: { ...cue, pos: { x: G.x, y: G.y } },
-                  maxBounces: Math.max(0, Number(CONFIG.maxRebounds) || 1),
+                  maxBounces: Math.max(
+                    Math.max(0, Number(CONFIG.maxRebounds) || 1),
+                    Math.max(1, Number(CONFIG.targetRestBounces) || 5)
+                  ),
                   tableSlidingAccel: livePhy.tableSlidingAccel,
                   rollingFriction: livePhy.rollingFriction,
                   sideSpinLinearDecay: livePhy.sideSpinLinearDecay,
@@ -5851,8 +5893,14 @@
                   lowSpeedCutoff: livePhy.lowSpeedCutoff,
                   lowOmegaCutoff: livePhy.lowOmegaCutoff,
                   dtMs: CONFIG.targetMicroDtMs,
-                  maxPathMm: CONFIG.targetMaxPathMm,
-                  maxSteps: CONFIG.targetMaxSteps,
+                  maxPathMm: Math.max(
+                    Number(CONFIG.targetMaxPathMm) || 9000,
+                    Number(CONFIG.targetRestMaxPathMm) || 15000
+                  ),
+                  maxSteps: Math.max(
+                    Number(CONFIG.targetMaxSteps) || 9000,
+                    Number(CONFIG.targetRestMaxSteps) || 18000
+                  ),
                 }
               );
 
@@ -5862,6 +5910,12 @@
                 reboundSegments = Array.isArray(sim.segments) && sim.segments.length
                   ? sim.segments
                   : null;
+                reboundDisplaySegments = Array.isArray(sim.displaySegments) && sim.displaySegments.length
+                  ? sim.displaySegments
+                  : reboundSegments;
+                reboundRestPoint = sim.restPoint || sim.terminal || null;
+                reboundRestExact = Boolean(sim.restExact);
+                reboundStopReason = sim.stopReason || null;
                 targetReboundMeta = {
                   model: sim.model,
                   power: initialPower,
@@ -5877,6 +5931,11 @@
                   firstRailOmegaZ: sim.firstRailHit.omega ? sim.firstRailHit.omega.z : 0,
                   bounces: sim.bounces,
                   travelledMm: sim.travelledMm,
+                  displayLengthMm: sim.displayLengthMm,
+                  restPoint: reboundRestPoint,
+                  restExact: reboundRestExact,
+                  stopReason: reboundStopReason,
+                  truncated: Boolean(sim.truncated),
                   hitPocket: sim.hitPocket,
                   hitBall: sim.hitBall && typeof sim.hitBall === 'object'
                     ? { id: sim.hitBall.id, pos: sim.hitBall.pos ? { x: sim.hitBall.pos.x, y: sim.hitBall.pos.y } : null }
@@ -5987,13 +6046,19 @@
     }
 
     result.physics = physics || Boolean(engine && engine.hit);
-    targetReboundDebug.displayLengthMm = Array.isArray(reboundSegments)
-      ? reboundSegments.reduce((sum, seg) => {
+    const displayReboundPath = Array.isArray(reboundDisplaySegments)
+      ? reboundDisplaySegments
+      : reboundSegments;
+    targetReboundDebug.displayLengthMm = Array.isArray(displayReboundPath)
+      ? displayReboundPath.reduce((sum, seg) => {
         const p1 = seg && (seg.from || seg.p1);
         const p2 = seg && (seg.to || seg.p2);
         return p1 && p2 ? sum + Math.hypot(p2.x - p1.x, p2.y - p1.y) : sum;
       }, 0)
       : 0;
+    targetReboundDebug.restPoint = reboundRestPoint;
+    targetReboundDebug.restExact = reboundRestExact;
+    targetReboundDebug.stopReason = reboundStopReason;
     if (targetReboundMeta) targetReboundMeta.displayLengthMm = targetReboundDebug.displayLengthMm;
     result.target = {
       ball: targetBall,
@@ -6004,6 +6069,13 @@
       objectPath: verts,
       objectEnd: (verts && verts.length >= 2) ? verts[verts.length - 1] : objectEnd,
       reboundSegments,
+      // v1.9.14：目标球蓝线使用“第一库后到真实停点”的完整折线；
+      // 长度随 effPower/tip/aim 重新推演，不再在第二库或固定路径上限处截断。
+      reboundDisplaySegments: displayReboundPath,
+      reboundRestPoint,
+      reboundDisplayLengthMm: targetReboundDebug.displayLengthMm,
+      reboundRestExact,
+      reboundStopReason,
       reboundMeta: targetReboundMeta,
       reboundDebug: targetReboundDebug,
       targetReboundReason: targetReboundDebug.reason,
@@ -6656,6 +6728,14 @@
       objectPath: snapshotPoints(t.objectPath),
       objectEnd: snapshotPoint(t.objectEnd),
       reboundSegments: snapshotReboundSegments(t.reboundSegments),
+      // v1.9.14：冻结层也要保留“到真实停点”的显示路径，否则出杆后
+      // 只能退回旧的 reboundSegments，动态长度会在击球瞬间丢失。
+      reboundDisplaySegments: snapshotReboundSegments(t.reboundDisplaySegments),
+      reboundRestPoint: snapshotPoint(t.reboundRestPoint),
+      reboundDisplayLengthMm: Number.isFinite(Number(t.reboundDisplayLengthMm))
+        ? Number(t.reboundDisplayLengthMm) : null,
+      reboundRestExact: Boolean(t.reboundRestExact),
+      reboundStopReason: t.reboundStopReason || null,
       reboundMeta: t.reboundMeta ? { ...t.reboundMeta } : null,
       reboundDebug: t.reboundDebug ? { ...t.reboundDebug } : null,
       pocket: t.pocket ? { ...t.pocket } : null,
@@ -6989,8 +7069,9 @@
       const predictedObjectPath = (pred.target && Array.isArray(pred.target.objectPath))
         ? pred.target.objectPath.map((p) => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }))
         : [];
-      const predictedTargetReboundSegments = (pred.target && Array.isArray(pred.target.reboundSegments))
-        ? pred.target.reboundSegments.map((seg) => ({
+      const predictedTargetReboundSegments = (pred.target
+        && Array.isArray(pred.target.reboundDisplaySegments || pred.target.reboundSegments))
+        ? (pred.target.reboundDisplaySegments || pred.target.reboundSegments).map((seg) => ({
           from: seg.from ? { x: Number(seg.from.x.toFixed(2)), y: Number(seg.from.y.toFixed(2)) } : null,
           to: seg.to ? { x: Number(seg.to.x.toFixed(2)), y: Number(seg.to.y.toFixed(2)) } : null,
           axis: seg.axis || null,
@@ -7798,6 +7879,18 @@
   /* overlay 画布与高清渲染层                                            */
   /* ================================================================== */
 
+  // v1.9.14：目标球蓝线优先使用“第一库后到真实停点”的显示折线。
+  // 旧快照/旧对象没有该字段时回退到 reboundSegments，保证兼容。
+  function getTargetReboundDisplaySegments(target) {
+    if (!target || typeof target !== 'object') return null;
+    if (Array.isArray(target.reboundDisplaySegments) && target.reboundDisplaySegments.length) {
+      return target.reboundDisplaySegments;
+    }
+    return Array.isArray(target.reboundSegments) && target.reboundSegments.length
+      ? target.reboundSegments
+      : null;
+  }
+
   const overlay = {
     canvas: null,
     ctx: null,
@@ -8255,10 +8348,11 @@
         }
       }
       // 目标球吃库反弹折线
-      if (showTargetRebound && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments)) {
+      const retainedTargetSegments = t ? getTargetReboundDisplaySegments(t) : null;
+      if (showTargetRebound && CONFIG.showObjectRebound && t && retainedTargetSegments) {
         const boundX = Number(pred.tableBounds && pred.tableBounds.boundX) || CONFIG.railBoundX;
         const boundY = Number(pred.tableBounds && pred.tableBounds.boundY) || CONFIG.railBoundY;
-        for (const seg of t.reboundSegments) {
+        for (const seg of retainedTargetSegments) {
           const p1 = seg && (seg.p1 || seg.from);
           const p2 = seg && (seg.p2 || seg.to);
           if (!p1 || !p2) continue;
@@ -8582,13 +8676,15 @@
         }
       }
 
-      // 3.2) 【目标球吃库反弹折线】：静态预览全长；出杆后目标球吃库线保持冻结，不随实时球位裁剪。
-      if (lineOptions.liveTargetRebound && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
-        let objectReboundSegments = t.reboundSegments;
+      // 3.2) 【目标球吃库反弹折线】：静态预览画到当前力度下的真实停点；
+      // 出杆后目标球吃库线保持冻结，不随实时球位裁剪。
+      const staticTargetSegments = t ? getTargetReboundDisplaySegments(t) : null;
+      if (lineOptions.liveTargetRebound && CONFIG.showObjectRebound && t && staticTargetSegments) {
+        let objectReboundSegments = staticTargetSegments;
         const reboundBoundX = Number(pred.tableBounds && pred.tableBounds.boundX) || CONFIG.railBoundX;
         const reboundBoundY = Number(pred.tableBounds && pred.tableBounds.boundY) || CONFIG.railBoundY;
         if (inMotion) {
-          const trimmedReboundPath = trimTargetReboundFromLive(t.reboundSegments, liveTargetPos, liveTargetPotted);
+          const trimmedReboundPath = trimTargetReboundFromLive(staticTargetSegments, liveTargetPos, liveTargetPotted);
           objectReboundSegments = [];
           if (Array.isArray(trimmedReboundPath) && trimmedReboundPath.length >= 2) {
             for (let i = 0; i < trimmedReboundPath.length - 1; i++) {
@@ -8625,8 +8721,8 @@
               // 垂直撞库时，真实反弹方向与绿色入射线共线；用虚线区分“回弹方向”，
               // 避免又出现一条实线蓝线看起来像在覆盖绿色瞄准线。
               let collinearRebound = false;
-              if (t && t.ball && t.objectDir && t.reboundSegments[0]) {
-                const r = V.norm(V.sub(t.reboundSegments[0].to, t.reboundSegments[0].from));
+              if (t && t.ball && t.objectDir && staticTargetSegments[0]) {
+                const r = V.norm(V.sub(staticTargetSegments[0].to, staticTargetSegments[0].from));
                 const o = V.norm(t.objectDir);
                 const cross = Math.abs(o.x * r.y - o.y * r.x);
                 const dot = V.dot(o, r);
