@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.8.9
+// @version      1.9.0
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.8.9';
+  const SCRIPT_VERSION = '1.9.0';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -6003,6 +6003,9 @@
   let _cueLineCompleted = false;
   let _targetLineCompleted = false;
   let _targetMaxTravel = 0;
+  let _targetReboundCompleted = false;
+  let _targetReboundEngaged = false;
+  let _targetReboundMaxTravel = 0;
   let _cueCushionCompleted = false;
   let _cueCushionEngaged = false;
   let _cueCushionMaxTravel = 0;
@@ -6020,6 +6023,9 @@
   function resetTargetMotionState() {
     _targetLineCompleted = false;
     _targetMaxTravel = 0;
+    _targetReboundCompleted = false;
+    _targetReboundEngaged = false;
+    _targetReboundMaxTravel = 0;
     _trackedTargetBallId = null;
     _trackedTargetPos = null;
   }
@@ -6554,6 +6560,112 @@
   }
 
   /**
+   * 目标球吃库反弹折线的动态裁剪：
+   * 目标球尚未到达第一库时保留全长；
+   * 目标球进入第一库后，从其实时位置开始保留未走的反弹段；
+   * 走完预测反弹路径或明显偏离时彻底销毁，避免残留。
+   */
+  function trimTargetReboundFromLive(segments, liveTargetPos, isTargetPotted) {
+    if (!Array.isArray(segments) || segments.length === 0) return null;
+    if (_targetReboundCompleted || isTargetPotted) {
+      _targetReboundCompleted = true;
+      return null;
+    }
+
+    const path = [];
+    for (const seg of segments) {
+      if (!seg || !seg.from || !seg.to) continue;
+      if (!path.length) path.push({ x: seg.from.x, y: seg.from.y });
+      const last = path[path.length - 1];
+      if (Math.hypot(seg.to.x - last.x, seg.to.y - last.y) > 1e-4) {
+        path.push({ x: seg.to.x, y: seg.to.y });
+      }
+    }
+    if (path.length < 2) return null;
+
+    if (!liveTargetPos) return path;
+
+    const startPt = path[0];
+    const endPt = path[path.length - 1];
+
+    // 目标球还没走到第一库接触点时，反弹折线保持完整；这与母球蓝线
+    // 在到达第一库前不被提前裁剪的处理一致。
+    if (!_targetReboundEngaged) {
+      const distToStart = Math.hypot(liveTargetPos.x - startPt.x, liveTargetPos.y - startPt.y);
+      if (distToStart > 35) return path;
+      _targetReboundEngaged = true;
+      _targetReboundMaxTravel = 0;
+    }
+
+    let bestSegmentIdx = -1;
+    let bestT = 0;
+    let bestDistSq = Infinity;
+    let accumulatedLen = 0;
+    let projTravel = 0;
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const p1 = path[i];
+      const p2 = path[i + 1];
+      const segDx = p2.x - p1.x;
+      const segDy = p2.y - p1.y;
+      const segLen = Math.hypot(segDx, segDy);
+      if (segLen < 1e-4) continue;
+
+      let t = ((liveTargetPos.x - p1.x) * segDx + (liveTargetPos.y - p1.y) * segDy) / (segLen * segLen);
+      t = clamp(t, 0, 1);
+      const projX = p1.x + t * segDx;
+      const projY = p1.y + t * segDy;
+      const dSq = (liveTargetPos.x - projX) ** 2 + (liveTargetPos.y - projY) ** 2;
+
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestSegmentIdx = i;
+        bestT = t;
+        projTravel = accumulatedLen + t * segLen;
+      }
+      accumulatedLen += segLen;
+    }
+
+    if (projTravel > _targetReboundMaxTravel) {
+      _targetReboundMaxTravel = projTravel;
+    }
+
+    // 目标球明显偏离预测反弹路径，说明实际撞库修正/二次碰撞与预测不符。
+    if (bestDistSq > 70 * 70 && projTravel > 20) {
+      _targetReboundCompleted = true;
+      return null;
+    }
+
+    // 实际沿反弹路径发生大幅倒退，直接终结，避免残线重新出现。
+    if (_targetReboundMaxTravel > 120 && projTravel < _targetReboundMaxTravel - 15) {
+      _targetReboundCompleted = true;
+      return null;
+    }
+
+    if (bestSegmentIdx < 0) {
+      _targetReboundCompleted = true;
+      return null;
+    }
+
+    // 目标球已到反弹路径终点（下一库/袋口）或剩余行程很短：整条蓝线吃完。
+    if (Math.hypot(liveTargetPos.x - endPt.x, liveTargetPos.y - endPt.y) <= 30 ||
+        accumulatedLen - projTravel <= 20) {
+      _targetReboundCompleted = true;
+      return null;
+    }
+
+    if (projTravel <= 5) return path;
+
+    // 从目标球实时位置开始，保留尚未走过的反弹路径，形成与母球蓝线
+    // 同款的单向吞噬擦除。
+    const trimmed = [{ x: liveTargetPos.x, y: liveTargetPos.y }];
+    for (let i = bestSegmentIdx + 1; i < path.length; i++) {
+      trimmed.push({ x: path[i].x, y: path[i].y });
+    }
+    return trimmed.length >= 2 ? trimmed : null;
+  }
+
+  /**
    * 计算目标球瞄准折线/直线随目标球向前行进的动态裁剪折线：
    * 目标球被撞动前（母球飞行阶段），100% 完整全长保留；
    * 目标球受撞向前行进时，起点跟随目标球推进，后方路径动态擦除；
@@ -7076,6 +7188,9 @@
         _cueLineCompleted = false;
         _targetLineCompleted = false;
         _targetMaxTravel = 0;
+        _targetReboundCompleted = false;
+        _targetReboundEngaged = false;
+        _targetReboundMaxTravel = 0;
         _cueCushionCompleted = false;
         _cueCushionEngaged = false;
         _cueCushionMaxTravel = 0;
@@ -7294,40 +7409,56 @@
         }
       }
 
-      // 3.2) 【目标球吃库反弹折线】：仅在瞄准静态预览时显示，出杆走位中不绘制 (走完即彻底终结，绝不画弹库残留)
-      if (!inMotion && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
-        for (const seg of t.reboundSegments) {
-          const p1 = seg && (seg.p1 || seg.from);
-          const p2 = seg && (seg.p2 || seg.to);
-          if (!p1 || !p2) continue;
-          const reboundProj = this.projectPolyline([p1, p2], cueWorld);
-          if (reboundProj.segments.length > 0) {
-            hasProjected = true;
-            ctx.save();
-            this.clipToTable(ctx);
-            ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff';
-            ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            // 垂直撞库时，真实反弹方向与绿色入射线共线；用虚线区分“回弹方向”，
-            // 避免又出现一条实线蓝线看起来像在覆盖绿色瞄准线。
-            let collinearRebound = false;
-            if (t && t.ball && t.objectDir && t.reboundSegments[0]) {
-              const r = V.norm(V.sub(t.reboundSegments[0].to, t.reboundSegments[0].from));
-              const o = V.norm(t.objectDir);
-              const cross = Math.abs(o.x * r.y - o.y * r.x);
-              const dot = V.dot(o, r);
-              collinearRebound = cross < 0.04 && dot < -0.7;
+      // 3.2) 【目标球吃库反弹折线】：静态预览全长；出杆后随目标球实时位置单向擦除
+      if (CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
+        let objectReboundSegments = t.reboundSegments;
+        if (inMotion) {
+          const trimmedReboundPath = trimTargetReboundFromLive(t.reboundSegments, liveTargetPos, liveTargetPotted);
+          objectReboundSegments = [];
+          if (Array.isArray(trimmedReboundPath) && trimmedReboundPath.length >= 2) {
+            for (let i = 0; i < trimmedReboundPath.length - 1; i++) {
+              objectReboundSegments.push({
+                from: trimmedReboundPath[i],
+                to: trimmedReboundPath[i + 1],
+              });
             }
-            ctx.setLineDash(collinearRebound ? [5, 4] : []);
-            ctx.beginPath();
-            for (const reboundSeg of reboundProj.segments) {
-              ctx.moveTo(reboundSeg[0].x, reboundSeg[0].y);
-              ctx.lineTo(reboundSeg[1].x, reboundSeg[1].y);
-              drawnSegments.push(reboundSeg);
+          }
+        }
+
+        if (objectReboundSegments.length > 0) {
+          for (const seg of objectReboundSegments) {
+            const p1 = seg && (seg.p1 || seg.from);
+            const p2 = seg && (seg.p2 || seg.to);
+            if (!p1 || !p2) continue;
+            const reboundProj = this.projectPolyline([p1, p2], cueWorld);
+            if (reboundProj.segments.length > 0) {
+              hasProjected = true;
+              ctx.save();
+              this.clipToTable(ctx);
+              ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff';
+              ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
+              ctx.lineCap = 'round';
+              ctx.lineJoin = 'round';
+              // 垂直撞库时，真实反弹方向与绿色入射线共线；用虚线区分“回弹方向”，
+              // 避免又出现一条实线蓝线看起来像在覆盖绿色瞄准线。
+              let collinearRebound = false;
+              if (t && t.ball && t.objectDir && t.reboundSegments[0]) {
+                const r = V.norm(V.sub(t.reboundSegments[0].to, t.reboundSegments[0].from));
+                const o = V.norm(t.objectDir);
+                const cross = Math.abs(o.x * r.y - o.y * r.x);
+                const dot = V.dot(o, r);
+                collinearRebound = cross < 0.04 && dot < -0.7;
+              }
+              ctx.setLineDash(collinearRebound ? [5, 4] : []);
+              ctx.beginPath();
+              for (const reboundSeg of reboundProj.segments) {
+                ctx.moveTo(reboundSeg[0].x, reboundSeg[0].y);
+                ctx.lineTo(reboundSeg[1].x, reboundSeg[1].y);
+                drawnSegments.push(reboundSeg);
+              }
+              ctx.stroke();
+              ctx.restore();
             }
-            ctx.stroke();
-            ctx.restore();
           }
         }
       }
