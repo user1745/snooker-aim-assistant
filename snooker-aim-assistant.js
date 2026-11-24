@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.14
-// @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.9.15
+// @description  目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.14';
+  const SCRIPT_VERSION = '1.9.15';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -108,6 +108,12 @@
     targetMaxSteps: 9000,
     // 目标球反弹线绘制：按距离采样后投影，避免整条跨台长段被 projectPolyline 丢弃或拉出屏幕。
     targetReboundSampleStepMm: 50,
+    // v1.9.15：目标球吃库反弹蓝线改为「随当前力度动态伸缩」，终点 = 该力度下的真实停点，
+    // 与母球吃库蓝线同一观感口径。长度由 computeTargetTravelBudgetMm() 的行程预算决定，
+    // 物理段仍由微模拟生成，只在显示层按预算截断。关掉即退回 v1.9.14 的固定长度行为。
+    targetReboundBudgetEnabled: true,
+    // 微模拟只跑到「预算 × 该余量」，不含在绘制上的部分纯粹是白算的步进。
+    targetReboundBudgetSimMargin: 1.35,
     // 袋口候选的最低置信度与库口距离容差；库边先于袋口时优先按吃库路线处理。
     pocketMinConfidence: 0.1,
     pocketRailToleranceMm: 40,
@@ -308,6 +314,53 @@
       out.push(b);
     }
     return out;
+  }
+
+  /**
+   * 【v1.9.15】按累计长度截断「{from,to} 段」形式的反弹折线。
+   * trimPolyline 只吃点数组，而目标球反弹线在内部一直是段数组（segments），
+   * 这里补一个同语义的段版本，供「目标球蓝线按力度预算截断」使用。
+   * @returns {{segments: Array, endPoint: ({x:number,y:number}|null), trimmed: boolean}}
+   */
+  function trimReboundSegmentsByLength(segments, maxLen) {
+    const list = Array.isArray(segments) ? segments : [];
+    const limit = Number(maxLen);
+    if (!list.length) return { segments: [], endPoint: null, trimmed: false };
+    if (!Number.isFinite(limit) || limit <= 0) {
+      return { segments: [], endPoint: null, trimmed: true };
+    }
+
+    const out = [];
+    let acc = 0;
+    for (const seg of list) {
+      if (!seg) continue;
+      const a = seg.from || seg.p1;
+      const b = seg.to || seg.p2;
+      if (!a || !b) continue;
+      if (!Number.isFinite(a.x) || !Number.isFinite(a.y) ||
+          !Number.isFinite(b.x) || !Number.isFinite(b.y)) continue;
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      if (d <= 1e-6) continue;
+
+      if (acc + d >= limit) {
+        const t = (limit - acc) / d;
+        const end = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+        // 剩余长度不足半个像素对应的物理量时不再追加退化段，直接以终点收尾。
+        if (limit - acc > 0.5) {
+          out.push({ ...seg, from: { x: a.x, y: a.y }, to: end });
+        }
+        return { segments: out, endPoint: end, trimmed: true };
+      }
+      acc += d;
+      out.push({ ...seg, from: { x: a.x, y: a.y }, to: { x: b.x, y: b.y } });
+    }
+
+    const last = out.length ? out[out.length - 1] : null;
+    return {
+      segments: out,
+      endPoint: last ? { x: last.to.x, y: last.to.y } : null,
+      trimmed: false,
+    };
   }
 
   // 提取折线中的撞库拐点（夹角突变 >60°）
@@ -1678,13 +1731,13 @@
     if (state.power != null && Number.isFinite(Number(state.power))) {
       return Number(state.power);
     }
-    if (state.aim && Number.isFinite(Number(state.aim.power))) {
+    if (state.aim && Number.isFinite(Number(state.aim.power)) && Number(state.aim.power) > 0) {
       return Number(state.aim.power);
     }
-    if (state.shot && Number.isFinite(Number(state.shot.power))) {
+    if (state.shot && Number.isFinite(Number(state.shot.power)) && Number(state.shot.power) > 0) {
       return Number(state.shot.power);
     }
-    if (state.cue && Number.isFinite(Number(state.cue.power))) {
+    if (state.cue && Number.isFinite(Number(state.cue.power)) && Number(state.cue.power) > 0) {
       return Number(state.cue.power);
     }
     return null;
@@ -5475,6 +5528,59 @@
   }
 
   /**
+   * 【v1.9.15】目标球碰后「总行程预算」(mm)。
+   *
+   * 为什么需要它：本地目标球微模拟 simulateTargetCushionPath() 的台呢滚动阻力
+   * 取自 live 物理参数 clothRollingDecelMmS2（缺省 125 mm/s²），而本文件里
+   * CUE_POWER_CURVE 是官方引擎实测曲线（满力仅 14870mm）。两者不同源——
+   * 满力时目标球碰后速度约 6800mm/s，按 125 mm/s² 纯滚要走约 18 万毫米，
+   * 远超 targetRestMaxPathMm(15000)，于是微模拟永远以 'max-path' 截断，
+   * 蓝线长度看起来完全不随力度变化。
+   *
+   * 解法：不动物理常数（会影响推荐力度、力度不足判定、母球到达速度等下游），
+   * 只在显示层按「当前力度真正能把目标球推多远」做截断。
+   *
+   * 公式与 attachShotPowerMetrics() 里的 actualReachMm 完全同源，保证
+   * 「蓝线长度」和「力度不足橙色虚线」永远用同一套口径，不会互相矛盾。
+   *
+   * @param {number} power       当前有效力度 0~100
+   * @param {{x:number,y:number}} tip 杆法偏移
+   * @param {number} verticalAngle 杆身仰角
+   * @param {number} sCueToContact 母球当前位置到接触点 G 的距离(mm)
+   * @param {number} cosCut      瞄准方向与目标球出球方向的夹角余弦
+   * @returns {number} 目标球从碰后起点开始能走的总距离(mm)
+   */
+  function computeTargetTravelBudgetMm(power, tip, verticalAngle, sCueToContact, cosCut) {
+    const p = clamp(Number(power) || 0, 0, 100);
+    if (p <= 2) return 0;
+
+    const sx = clamp(Number(tip && tip.x) || 0, -1, 1);
+    const sy = clamp(Number(tip && tip.y) || 0, -1, 1);
+    const backspinRatio = clamp(-sy / 0.5, 0, 1);
+    const topspinRatio = clamp(sy / 0.5, 0, 1);
+    const sideRatio = clamp(Math.abs(sx) / 0.5, 0, 1);
+
+    // 低杆逆旋强滑移功耗 / 高杆略微增程 / 侧塞小幅折损
+    const kBackspin = backspinRatio > 0
+      ? (1.0 - 0.35 * Math.pow(backspinRatio, 1.15))
+      : (1.0 + 0.08 * Math.pow(topspinRatio, 1.2));
+    const kSidespin = 1.0 - 0.10 * (sideRatio * sideRatio);
+    const spinDynamicRetention = Math.max(0.40, kBackspin * kSidespin);
+
+    // 碰撞瞬间传递给目标球的正向冲量折减
+    const transferEff = 0.88 * (1.0 - 0.10 * backspinRatio);
+
+    const retention = tipSpeedRetention(tip) * resolveV3ElevationRetention(verticalAngle);
+    const totalCueTravel = cueTravelByPower(p, retention) * spinDynamicRetention;
+    // 母球滚到接触点途中被逆旋滑移额外吃掉的部分（等效行程损耗放大 2.7 倍）
+    const sCueLoss = Math.max(0, Number(sCueToContact) || 0) * (1.0 + 1.7 * backspinRatio);
+    const remainCueTravel = Math.max(0, totalCueTravel - sCueLoss);
+
+    const cc = clamp(Number.isFinite(Number(cosCut)) ? Number(cosCut) : 1, 0.08, 1);
+    return Math.max(0, remainCueTravel * cc * cc * transferEff);
+  }
+
+  /**
    * 0ms 瞬时解析物理母球走位预测（轻量级无延迟物理引擎 v1.7.7）
    * 依据动量分离定理、切角能量守恒、高低杆滑动-滚动转换冲量及四库级连续弹性反弹
    */
@@ -5789,6 +5895,10 @@
     let reboundRestExact = false;
     let reboundStopReason = null;
     let targetReboundMeta = null;
+    let targetSimFallback = null;
+    // v1.9.15：目标球在当前力度下的总行程预算(mm)。由 computeTargetTravelBudgetMm() 求得，
+    // 既用于把微模拟的路径上限压到预算附近（省掉无意义的步进），也用于显示层截断蓝线。
+    let targetTravelBudgetMm = null;
     // v1.9.8 调试字段：记录本次目标球反弹线为什么生成/为什么没有生成。
     const targetReboundDebug = {
       reason: pocket ? 'pocket' : 'rail',
@@ -5836,6 +5946,15 @@
             const cueSpeed = resolveCueSpeed(initialPower)
               * liveTipRetention
               * resolveV3ElevationRetention(targetVertAngle);
+            // v1.9.15：先算目标球行程预算。后面既用它压缩微模拟的路径上限（改动 4），
+            // 也用它把蓝线截到当前力度下的真实停点（改动 2）。
+            targetTravelBudgetMm = computeTargetTravelBudgetMm(
+              initialPower,
+              tip,
+              targetVertAngle,
+              V.dist(cue.pos, G),
+              clamp(V.dot(d, n), 0.08, 1)
+            );
             // v1.9.4：先把母球从当前位置推进到接触点 G，得到碰撞瞬间的 v/ω；
             // 不能把出杆初速直接当作碰球速度。
             const cueArrival = initialPower > 0 ? simulateCueArrivalAtContact(
@@ -5867,42 +5986,126 @@
             }
 
             if (impact) {
-              const sim = simulateTargetCushionPath(
+              // v1.9.15（改动 4）：显示层反正要按力度预算截断，微模拟没必要跑满 15m。
+              // 本地滚动阻力(125mm/s²)与实测 CUE_POWER_CURVE 不同源，满力时球要"走"十几万毫米，
+              // 循环会一路步进到 maxPath/maxSteps 才停——每帧拖力度条都在白烧 CPU。
+              // 这里只给预算留 targetReboundBudgetSimMargin 的余量，越界仍由 max-steps/max-path 兜底。
+              const fullSimPathMm = Math.max(
+                Number(CONFIG.targetMaxPathMm) || 9000,
+                Number(CONFIG.targetRestMaxPathMm) || 15000
+              );
+              const budgetForSim = Number(targetTravelBudgetMm);
+              // 关键：路径上限不能压到「目标球到第一库」的距离以内，否则首库接触点会检测不到，
+              // 绿线终点和蓝线起点都会断。取「预算余量」与「首库距离 ×1.2」的较大值。
+              const railDistForSim = (targetRailHit && Number.isFinite(Number(targetRailHit.t)))
+                ? Number(targetRailHit.t) : 0;
+              const budgetCapMm = (Number.isFinite(budgetForSim) && budgetForSim > 0)
+                ? budgetForSim * (Number(CONFIG.targetReboundBudgetSimMargin) || 1.35) + 300
+                : fullSimPathMm;
+              const simPathCapMm = clamp(
+                Math.max(budgetCapMm, railDistForSim * 1.2),
+                1200,
+                fullSimPathMm
+              );
+              const targetSimOpts = {
+                // 目标球物理也使用球心有效边界；碰库时球心到达 ±bound，
+                // 而不是先穿到库木内沿再反弹。
+                cushionX: boundX,
+                cushionY: boundY,
+                pockets,
+                balls: objects,
+                ignoreIds: new Set([targetBall.id]),
+                // 目标球回弹时，母球已到达接触点 G；用 G 而不是出杆前
+                // 的母球位置当回弹障碍，否则会把折线截得过短。
+                lateCueBall: { ...cue, pos: { x: G.x, y: G.y } },
+                maxBounces: Math.max(
+                  Math.max(0, Number(CONFIG.maxRebounds) || 1),
+                  Math.max(1, Number(CONFIG.targetRestBounces) || 5)
+                ),
+                tableSlidingAccel: livePhy.tableSlidingAccel,
+                rollingFriction: livePhy.rollingFriction,
+                sideSpinLinearDecay: livePhy.sideSpinLinearDecay,
+                slipEpsilon: livePhy.slipEpsilon,
+                lowSpeedCutoff: livePhy.lowSpeedCutoff,
+                lowOmegaCutoff: livePhy.lowOmegaCutoff,
+                dtMs: CONFIG.targetMicroDtMs,
+                maxPathMm: simPathCapMm,
+                maxSteps: Math.max(
+                  Number(CONFIG.targetMaxSteps) || 9000,
+                  Number(CONFIG.targetRestMaxSteps) || 18000
+                ),
+              };
+              let sim = simulateTargetCushionPath(
                 targetBall.pos,
                 impact.vel,
                 impact.omega,
-                {
-                  // 目标球物理也使用球心有效边界；碰库时球心到达 ±bound，
-                  // 而不是先穿到库木内沿再反弹。
-                  cushionX: boundX,
-                  cushionY: boundY,
-                  pockets,
-                  balls: objects,
-                  ignoreIds: new Set([targetBall.id]),
-                  // 目标球回弹时，母球已到达接触点 G；用 G 而不是出杆前
-                  // 的母球位置当回弹障碍，否则会把折线截得过短。
-                  lateCueBall: { ...cue, pos: { x: G.x, y: G.y } },
-                  maxBounces: Math.max(
-                    Math.max(0, Number(CONFIG.maxRebounds) || 1),
-                    Math.max(1, Number(CONFIG.targetRestBounces) || 5)
-                  ),
-                  tableSlidingAccel: livePhy.tableSlidingAccel,
-                  rollingFriction: livePhy.rollingFriction,
-                  sideSpinLinearDecay: livePhy.sideSpinLinearDecay,
-                  slipEpsilon: livePhy.slipEpsilon,
-                  lowSpeedCutoff: livePhy.lowSpeedCutoff,
-                  lowOmegaCutoff: livePhy.lowOmegaCutoff,
-                  dtMs: CONFIG.targetMicroDtMs,
-                  maxPathMm: Math.max(
-                    Number(CONFIG.targetMaxPathMm) || 9000,
-                    Number(CONFIG.targetRestMaxPathMm) || 15000
-                  ),
-                  maxSteps: Math.max(
-                    Number(CONFIG.targetMaxSteps) || 9000,
-                    Number(CONFIG.targetRestMaxSteps) || 18000
-                  ),
-                }
+                targetSimOpts
               );
+
+              // v1.9.15：中大力时，球-球碰撞的微小切向分量可能把
+              // 全角度目标球的微模拟方向带偏几度，恰好从袋口夹角穿出，
+              // 结果 firstRailHit 为空；但几何连心线明确会先吃库。
+              // 此时保留真实碰撞速度，只把初始方向校正到几何第一库点重试。
+              // 不能直接把任何无第一库的结果都画成折线，只有目标球确实
+              // 能到达该库（按速度/摩擦预算判断）才启用。
+              if ((!sim || !sim.firstRailHit || !sim.firstRailHit.point) &&
+                  targetRailHit && impact.speed > 0) {
+                const railDir = V.norm(V.sub(targetRailHit.point, targetBall.pos));
+                if (railDir && Number.isFinite(railDir.x) && Number.isFinite(railDir.y)) {
+                  const alignedSim = simulateTargetCushionPath(
+                    targetBall.pos,
+                    { x: railDir.x * impact.speed, y: railDir.y * impact.speed },
+                    impact.omega,
+                    targetSimOpts
+                  );
+                  if (alignedSim && alignedSim.firstRailHit && alignedSim.firstRailHit.point) {
+                    sim = alignedSim;
+                    targetSimFallback = 'aligned-normal';
+                  } else {
+                    const railDist = V.dist(targetBall.pos, targetRailHit.point);
+                    const decel = Math.max(100, Number(livePhy.rollingFriction) || CONFIG.clothRollingDecelMmS2 || 125);
+                    const travelBudget = (impact.speed * impact.speed) / (2 * decel);
+                    if (travelBudget >= railDist + 200) {
+                      const geo = traceTargetCushionReboundSegments(
+                        targetRailHit,
+                        railDir,
+                        boundX,
+                        boundY,
+                        pockets,
+                        Math.max(2, Number(CONFIG.targetRestBounces) || 5)
+                      );
+                      if (geo.length) {
+                        const end = geo[geo.length - 1].to;
+                        const geoLength = geo.reduce((sum, seg) => {
+                          return sum + Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y);
+                        }, 0);
+                        sim = {
+                          segments: geo,
+                          displaySegments: geo,
+                          displayLengthMm: geoLength,
+                          firstRailHit: {
+                            point: { ...targetRailHit.point },
+                            axis: targetRailHit.axis,
+                            speed: impact.speed,
+                            omega: impact.omega,
+                          },
+                          terminal: end,
+                          restPoint: end,
+                          restExact: false,
+                          stopReason: 'geometric-fallback',
+                          truncated: true,
+                          bounces: geo.length,
+                          hitPocket: false,
+                          hitBall: null,
+                          travelledMm: 0,
+                          model: 'target-physics-fallback',
+                        };
+                        targetSimFallback = 'geometric';
+                      }
+                    }
+                  }
+                }
+              }
 
               if (sim && sim.firstRailHit && sim.firstRailHit.point) {
                 // 绿色线终点改为物理微模拟真正碰到的第一库点，保证绿/蓝起点相连。
@@ -5936,6 +6139,7 @@
                   restExact: reboundRestExact,
                   stopReason: reboundStopReason,
                   truncated: Boolean(sim.truncated),
+                  fallback: targetSimFallback,
                   hitPocket: sim.hitPocket,
                   hitBall: sim.hitBall && typeof sim.hitBall === 'object'
                     ? { id: sim.hitBall.id, pos: sim.hitBall.pos ? { x: sim.hitBall.pos.x, y: sim.hitBall.pos.y } : null }
@@ -5952,6 +6156,7 @@
                   terminal: sim.terminal,
                   travelledMm: sim.travelledMm,
                   noFirstRail: true,
+                  fallback: targetSimFallback,
                 };
               }
             }
@@ -6046,9 +6251,81 @@
     }
 
     result.physics = physics || Boolean(engine && engine.hit);
-    const displayReboundPath = Array.isArray(reboundDisplaySegments)
+    const rawDisplayReboundPath = Array.isArray(reboundDisplaySegments)
       ? reboundDisplaySegments
       : reboundSegments;
+
+    /* 【v1.9.15 · 改动 2】目标球吃库反弹蓝线：随当前力度动态伸缩，终点 = 该力度下的真实停点。
+     *
+     * 母球「直接吃库」那条蓝线之所以准，是因为它走 engineSim.nativeTwoRail() 的官方内核
+     * physics.step()，逐帧推进到 isTableMoving() 为 false 才收尾，长度天然等于真实停点。
+     *
+     * 目标球这条走的是本地微模拟，台呢滚动阻力(clothRollingDecelMmS2，缺省 125mm/s²)与
+     * 实测的 CUE_POWER_CURVE(满力仅 14870mm)不同源：满力时目标球碰后速度约 6800mm/s，
+     * 按 125mm/s² 纯滚要走约 18 万毫米，所以永远撞在 targetRestMaxPathMm(15000) 上被截断，
+     * 拖力度条时长度几乎不动。
+     *
+     * 这里不动物理常数（会连累推荐力度/力度不足判定/母球到达速度），只在显示层按
+     * 「当前力度真正能把目标球推多远」截断。公式与 attachShotPowerMetrics().actualReachMm
+     * 完全同源，保证蓝线长度和「力度不足橙色虚线」不会互相打架。
+     */
+    let displayReboundPath = rawDisplayReboundPath;
+    let reboundBudgetMm = null;
+    let reboundBudgetTrimmedMm = 0;
+    let reboundBudgetLimited = false;
+    if (CONFIG.targetReboundBudgetEnabled && Array.isArray(rawDisplayReboundPath) && rawDisplayReboundPath.length) {
+      // 极端情况下（预算在别处算过但为 null）在这里兜底重算，口径保持一致。
+      let budgetMm = Number(targetTravelBudgetMm);
+      if (!Number.isFinite(budgetMm) || budgetMm <= 0) {
+        budgetMm = computeTargetTravelBudgetMm(
+          effPower,
+          tip,
+          vertAngle,
+          V.dist(cue.pos, G),
+          clamp(V.dot(d, n), 0.08, 1)
+        );
+      }
+
+      const firstSegStart = (() => {
+        const seg = rawDisplayReboundPath[0];
+        const p = seg && (seg.from || seg.p1);
+        return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : null;
+      })();
+      // 预算覆盖的是「目标球从碰后起点到最终停点」的总路程，蓝线只负责第一库之后那一段，
+      // 所以要先扣掉绿线(碰点→第一库)已经占用的距离。
+      const greenLenMm = firstSegStart ? V.dist(targetBall.pos, firstSegStart) : 0;
+      const blueBudgetMm = Math.max(0, budgetMm - greenLenMm);
+
+      const rawLenMm = rawDisplayReboundPath.reduce((sum, seg) => {
+        if (!seg) return sum;
+        const p1 = seg.from || seg.p1;
+        const p2 = seg.to || seg.p2;
+        return (p1 && p2) ? sum + Math.hypot(p2.x - p1.x, p2.y - p1.y) : sum;
+      }, 0);
+
+      const cut = trimReboundSegmentsByLength(rawDisplayReboundPath, blueBudgetMm);
+      const keptLenMm = cut.segments.reduce((sum, seg) => {
+        return sum + Math.hypot(seg.to.x - seg.from.x, seg.to.y - seg.from.y);
+      }, 0);
+
+      reboundBudgetMm = Math.round(budgetMm);
+      reboundBudgetTrimmedMm = Math.max(0, Math.round(rawLenMm - keptLenMm));
+      reboundBudgetLimited = Boolean(cut.trimmed);
+
+      if (cut.segments.length) {
+        displayReboundPath = cut.segments;
+        if (cut.endPoint) reboundRestPoint = cut.endPoint;
+        // 被力度预算截断的终点不是物理停稳点，别让外部把它当真实 restPoint。
+        if (cut.trimmed) reboundRestExact = false;
+      } else {
+        // 力度根本推不到第一库：整条蓝线不画（绿线本身会走「力度不足」的橙色虚线分支）。
+        displayReboundPath = [];
+        reboundRestPoint = null;
+        reboundRestExact = false;
+        reboundStopReason = 'power-budget';
+      }
+    }
+
     targetReboundDebug.displayLengthMm = Array.isArray(displayReboundPath)
       ? displayReboundPath.reduce((sum, seg) => {
         const p1 = seg && (seg.from || seg.p1);
@@ -6059,6 +6336,16 @@
     targetReboundDebug.restPoint = reboundRestPoint;
     targetReboundDebug.restExact = reboundRestExact;
     targetReboundDebug.stopReason = reboundStopReason;
+    // v1.9.15：预算诊断字段，实机拖力度条时可直接看 budgetMm / displayLengthMm 是否同步变化。
+    targetReboundDebug.budgetMm = reboundBudgetMm;
+    targetReboundDebug.budgetTrimmedMm = reboundBudgetTrimmedMm;
+    targetReboundDebug.budgetLimited = reboundBudgetLimited;
+    // 微模拟元数据里的停点也要跟着截断结果走，否则导出的 reboundMeta 会和实际画出来的线不一致。
+    if (targetReboundMeta) {
+      targetReboundMeta.restPoint = reboundRestPoint;
+      targetReboundMeta.restExact = reboundRestExact;
+      targetReboundMeta.budgetMm = reboundBudgetMm;
+    }
     if (targetReboundMeta) targetReboundMeta.displayLengthMm = targetReboundDebug.displayLengthMm;
     result.target = {
       ball: targetBall,
@@ -6070,7 +6357,7 @@
       objectEnd: (verts && verts.length >= 2) ? verts[verts.length - 1] : objectEnd,
       reboundSegments,
       // v1.9.14：目标球蓝线使用“第一库后到真实停点”的完整折线；
-      // 长度随 effPower/tip/aim 重新推演，不再在第二库或固定路径上限处截断。
+      // v1.9.15：再按当前力度的行程预算截断，长度随力度实时伸缩，终点即该力度下的停点。
       reboundDisplaySegments: displayReboundPath,
       reboundRestPoint,
       reboundDisplayLengthMm: targetReboundDebug.displayLengthMm,
@@ -6082,6 +6369,10 @@
       targetFirstRailHit: targetReboundDebug.firstRailHit,
       targetPocketCandidate: targetReboundDebug.pocketCandidate,
       targetReboundDisplayLengthMm: targetReboundDebug.displayLengthMm,
+      // v1.9.15：本次蓝线使用的力度行程预算与截断量（mm），供 HUD / 控制台核对。
+      reboundBudgetMm,
+      reboundBudgetTrimmedMm,
+      reboundBudgetLimited,
       pathLengthMm: polylineLength(verts),
       source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
       cushionHug: pocket?.cushionHug || checkCushionHug(targetBall.pos, tableBoundsObj),
@@ -6730,7 +7021,15 @@
       reboundSegments: snapshotReboundSegments(t.reboundSegments),
       // v1.9.14：冻结层也要保留“到真实停点”的显示路径，否则出杆后
       // 只能退回旧的 reboundSegments，动态长度会在击球瞬间丢失。
-      reboundDisplaySegments: snapshotReboundSegments(t.reboundDisplaySegments),
+      // v1.9.15：预算把蓝线清空时，快照必须保留“显式空数组”——snapshotReboundSegments([])
+      // 会返回 null，而 null 会让绘制层回退到未截断的 reboundSegments，把长线又画回来。
+      reboundDisplaySegments: (
+        Array.isArray(t.reboundDisplaySegments) &&
+        t.reboundDisplaySegments.length === 0 &&
+        t.reboundBudgetLimited
+      ) ? [] : snapshotReboundSegments(t.reboundDisplaySegments),
+      reboundBudgetMm: Number.isFinite(Number(t.reboundBudgetMm)) ? Number(t.reboundBudgetMm) : null,
+      reboundBudgetLimited: Boolean(t.reboundBudgetLimited),
       reboundRestPoint: snapshotPoint(t.reboundRestPoint),
       reboundDisplayLengthMm: Number.isFinite(Number(t.reboundDisplayLengthMm))
         ? Number(t.reboundDisplayLengthMm) : null,
@@ -7883,8 +8182,11 @@
   // 旧快照/旧对象没有该字段时回退到 reboundSegments，保证兼容。
   function getTargetReboundDisplaySegments(target) {
     if (!target || typeof target !== 'object') return null;
-    if (Array.isArray(target.reboundDisplaySegments) && target.reboundDisplaySegments.length) {
-      return target.reboundDisplaySegments;
+    if (Array.isArray(target.reboundDisplaySegments)) {
+      if (target.reboundDisplaySegments.length) return target.reboundDisplaySegments;
+      // v1.9.15：力度预算把蓝线截成空数组 = 明确「这个力度推不到第一库，不画」。
+      // 必须在这里挡住，否则会回退到未截断的 reboundSegments，把整条长线又画回来。
+      if (target.reboundBudgetLimited) return null;
     }
     return Array.isArray(target.reboundSegments) && target.reboundSegments.length
       ? target.reboundSegments
@@ -10301,10 +10603,15 @@
       const pred = attachShotPowerMetrics(_lastGeomPred, state);
       // v1.9.13：全台停球后冻结快照已经清空；静态瞄准只画当前预测。
       // 这里的保留入口仅用于极端情况下尚未进入停球分支的瞬态帧兜底。
+      // v1.9.15：判定改用「显示层真正会画的那条路径」，而不是未截断的 reboundSegments。
+      // 否则预算已把蓝线清空时，还会白传一份什么都画不出来的快照。
+      const retainedTargetDisplaySegments = _retainedShotPred
+        ? getTargetReboundDisplaySegments(_retainedShotPred.target)
+        : null;
       const retainedTargetPred = (_retainedShotPred &&
         CONFIG.retainShotAssistLines &&
-        Array.isArray(_retainedShotPred.target?.reboundSegments) &&
-        _retainedShotPred.target.reboundSegments.length > 0)
+        Array.isArray(retainedTargetDisplaySegments) &&
+        retainedTargetDisplaySegments.length > 0)
         ? _retainedShotPred
         : null;
       const didDraw = overlay.drawPrediction(
@@ -10436,6 +10743,8 @@
       resolveCompensatedPocketTarget,
       rayRailHit,
       trimPolyline,
+      trimReboundSegmentsByLength,
+      computeTargetTravelBudgetMm,
       detectJunctions,
       evaluatePocket,
       formatPocketLabel,
