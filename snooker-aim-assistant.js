@@ -118,6 +118,10 @@
     targetReboundBudgetEnabled: true,
     // 微模拟只跑到「预算 × 该余量」，不含在绘制上的部分纯粹是白算的步进。
     targetReboundBudgetSimMargin: 1.35,
+    // 目标球反弹线真实停点标记（仅当蓝线来自官方引擎 targetPath 时显示）
+    showTargetReboundStop: true,
+    targetReboundStopColor: '#86cfff',
+    targetReboundStopRadiusPx: 2.6,
     // 袋口候选的最低置信度与库口距离容差；库边先于袋口时优先按吃库路线处理。
     pocketMinConfidence: 0.1,
     pocketRailToleranceMm: 40,
@@ -365,6 +369,43 @@
       endPoint: last ? { x: last.to.x, y: last.to.y } : null,
       trimmed: false,
     };
+  }
+
+  /**
+   * 从官方引擎 targetPath 中截取「第一库之后」的反弹段。
+   * 官方 targetPath 是目标球碰后到真实停点的完整逐帧轨迹，包含真实库边反弹、
+   * 多库衰减与最终停点；这里以绿色瞄准线终点（第一库接触点）为锚点，
+   * 只保留锚点之后的轨迹，供目标球蓝色反弹线直接使用。
+   * @returns {Array<{x:number,y:number}>|null}
+   */
+  function sliceEngineReboundPath(targetPath, joinPoint, toleranceMm = 120) {
+    if (!Array.isArray(targetPath) || targetPath.length < 2) return null;
+    if (!joinPoint || !Number.isFinite(joinPoint.x) || !Number.isFinite(joinPoint.y)) return null;
+
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < targetPath.length; i++) {
+      const p = targetPath[i];
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const d = Math.hypot(p.x - joinPoint.x, p.y - joinPoint.y);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    // 目标球在到达第一库前就停下（或引擎轨迹没跑到库边）时，没有反弹段。
+    if (bestIdx < 0 || bestIdx >= targetPath.length - 1) return null;
+    if (bestDist > Math.max(20, Number(toleranceMm) || 120)) return null;
+
+    const out = [{ x: joinPoint.x, y: joinPoint.y }];
+    for (let i = bestIdx + 1; i < targetPath.length; i++) {
+      const p = targetPath[i];
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const last = out[out.length - 1];
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.5) continue;
+      out.push({ x: p.x, y: p.y });
+    }
+    return out.length >= 2 ? out : null;
   }
 
   // 提取折线中的撞库拐点（夹角突变 >60°）
@@ -975,6 +1016,36 @@
       const tb = lastFrame ? at(lastFrame, targetId) : null;
       const cb = lastFrame ? at(lastFrame, cueId) : null;
 
+      // sample() 以 6mm 最小步长采样，最后一小段蠕动可能不足 6mm 而被丢掉；
+      // 这里补上目标球最终停点，保证蓝线终点/停点标记就是引擎真实停点。
+      if (tb && tb.pos && !tb.potted &&
+          Number.isFinite(tb.pos.x) && Number.isFinite(tb.pos.y)) {
+        const lastTarget = targetPath[targetPath.length - 1];
+        if (!lastTarget || Math.hypot(tb.pos.x - lastTarget.x, tb.pos.y - lastTarget.y) > 0.01) {
+          targetPath.push({ x: tb.pos.x, y: tb.pos.y });
+        }
+      }
+
+      // 目标球第一次真实碰库事件：用事件时间切出「第一库之后」的官方轨迹。
+      // 比按最近点匹配更可靠，避免目标球多库折返后靠近首库点时切错位置。
+      const targetRailEvent = events
+        .filter((e) => e && e.type === 'ball-hit-rail' &&
+          (e.ballId === targetId || e.ballAId === targetId || e.ballBId === targetId) &&
+          Number(e.t) >= hitT - 1e-6)
+        .sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0))[0] || null;
+      const targetFirstRailT = targetRailEvent && Number.isFinite(Number(targetRailEvent.t))
+        ? Number(targetRailEvent.t) : null;
+      const targetPathAfterRail = (targetFirstRailT != null)
+        ? sample(targetId, 6, targetFirstRailT)
+        : [];
+      if (targetPathAfterRail.length && tb && tb.pos && !tb.potted &&
+          Number.isFinite(tb.pos.x) && Number.isFinite(tb.pos.y)) {
+        const lastAfterRail = targetPathAfterRail[targetPathAfterRail.length - 1];
+        if (!lastAfterRail || Math.hypot(tb.pos.x - lastAfterRail.x, tb.pos.y - lastAfterRail.y) > 0.01) {
+          targetPathAfterRail.push({ x: tb.pos.x, y: tb.pos.y });
+        }
+      }
+
       // 库边阻尼与旋转损耗定标 (根据 39 杆实测数据真实拟合，低杆与多次碰库不再过度截断)
       if (cuePath.length >= 2) {
         const railBounces = events.filter((e) => e.type === 'ball-hit-rail' &&
@@ -1007,6 +1078,8 @@
         hit: true,
         targetId,
         targetPath,
+        targetFirstRailT,
+        targetPathAfterRail,
         cuePath,
         potted: Boolean(tb && tb.potted),
         cuePotted: Boolean(cb && cb.potted),
@@ -6243,12 +6316,20 @@
     }
     result.engineSim = engine;
 
+    // 官方引擎命中目标必须与几何瞄准目标一致，否则 targetPath 属于另一颗球，
+    // 不能拿来当本杆目标球的停点/反弹线。
+    const engineTargetMatches = Boolean(
+      engine && engine.hit &&
+      engine.targetId != null &&
+      String(engine.targetId) === String(targetBall.id)
+    );
+
     // 【精度优先】官方引擎的 targetPath 是目标球碰后到真实停点的完整逐帧轨迹。
     // 用它的总长度作为目标球行程预算，直接复用官方碰后速度、滑-滚转换与库边/球体
     // 碰撞结果，避免本地经验公式在不同力度下出现“有时多跑、有时少跑”的双向误差。
     // stale 结果是上一力度/上几帧的缓存，不用于停点判断，继续走本文件兜底模型。
     let engineTargetReachMm = null;
-    if (engine && engine.hit && !engine.stale &&
+    if (engineTargetMatches && !engine.stale &&
         Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
       const engineTravelMm = polylineLength(engine.targetPath);
       if (Number.isFinite(engineTravelMm) && engineTravelMm > 0) {
@@ -6271,6 +6352,64 @@
         }
         if (engine.cuePotted) {
           result.cuePottedWarning = true;
+        }
+      }
+    }
+
+    // 【目标球反弹线借鉴母球落位预测】官方 targetPath 与母球 cuePath 同源，
+    // 都是 simulateShot() 的真实逐帧物理结果。直接截取第一库之后的轨迹作为蓝线，
+    // 形状、库边衰减与最终停点全部来自官方引擎，不再依赖本地经验预算截断。
+    let reboundFromEngineSim = false;
+    if (engineTargetMatches && !engine.stale &&
+        targetReboundDebug.reason === 'rail' &&
+        Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
+      let engineReboundPts = null;
+      if (Array.isArray(engine.targetPathAfterRail) && engine.targetPathAfterRail.length >= 1) {
+        engineReboundPts = [{ x: objectEnd.x, y: objectEnd.y }];
+        for (const p of engine.targetPathAfterRail) {
+          if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+          const last = engineReboundPts[engineReboundPts.length - 1];
+          if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.5) continue;
+          engineReboundPts.push({ x: p.x, y: p.y });
+        }
+        if (engineReboundPts.length < 2) engineReboundPts = null;
+      }
+      if (!engineReboundPts) {
+        engineReboundPts = sliceEngineReboundPath(engine.targetPath, objectEnd);
+      }
+      if (engineReboundPts && engineReboundPts.length >= 2) {
+        const sampledRebound = samplePolylineByDistance(
+          engineReboundPts,
+          CONFIG.targetReboundSampleStepMm || 50
+        );
+        const engineReboundSegments = [];
+        for (let i = 0; i < sampledRebound.length - 1; i++) {
+          engineReboundSegments.push({
+            from: { x: sampledRebound[i].x, y: sampledRebound[i].y },
+            to: { x: sampledRebound[i + 1].x, y: sampledRebound[i + 1].y },
+            axis: null,
+          });
+        }
+        if (engineReboundSegments.length) {
+          reboundSegments = engineReboundSegments;
+          reboundDisplaySegments = engineReboundSegments;
+          reboundRestPoint = engineReboundPts[engineReboundPts.length - 1];
+          reboundRestExact = true;
+          reboundStopReason = 'engineSim';
+          reboundFromEngineSim = true;
+          targetReboundMeta = {
+            model: 'engineSim-target-path',
+            power: effPower,
+            cutAngleDeg,
+            engineTravelMm: polylineLength(engine.targetPath),
+            displayLengthMm: polylineLength(engineReboundPts),
+            bounces: detectJunctions(engineReboundPts).length,
+            restPoint: reboundRestPoint,
+            restExact: true,
+            stopReason: 'engineSim',
+            hitPocket: Boolean(engine.potted),
+            terminal: reboundRestPoint,
+          };
         }
       }
     }
@@ -6317,7 +6456,7 @@
     let reboundBudgetMm = null;
     let reboundBudgetTrimmedMm = 0;
     let reboundBudgetLimited = false;
-    if (CONFIG.targetReboundBudgetEnabled && Array.isArray(rawDisplayReboundPath) && rawDisplayReboundPath.length) {
+    if (!reboundFromEngineSim && CONFIG.targetReboundBudgetEnabled && Array.isArray(rawDisplayReboundPath) && rawDisplayReboundPath.length) {
       // 极端情况下（预算在别处算过但为 null）在这里兜底重算，口径保持一致。
       let budgetMm = Number(targetTravelBudgetMm);
       if (!Number.isFinite(budgetMm) || budgetMm <= 0) {
@@ -9205,6 +9344,25 @@
               ctx.stroke();
               ctx.restore();
             }
+          }
+        }
+
+        // 官方引擎轨迹的真实停点标记：只在该蓝线确实来自 engine targetPath 时显示。
+        // 力度变化时 engine targetPath 会同步更新，标记随预测停点实时移动。
+        if (!inMotion && CONFIG.showTargetReboundStop &&
+            t.reboundRestExact && t.reboundStopReason === 'engineSim' && t.reboundRestPoint) {
+          const stopPx = this.localCloth(t.reboundRestPoint, cueWorld);
+          if (stopPx && this.isSafeProjectedPoint(stopPx)) {
+            ctx.save();
+            this.clipToTable(ctx, pred.tableBounds);
+            ctx.beginPath();
+            ctx.arc(stopPx.x, stopPx.y, CONFIG.targetReboundStopRadiusPx || 2.6, 0, Math.PI * 2);
+            ctx.fillStyle = CONFIG.targetReboundStopColor || CONFIG.cueCushionReboundColor || '#86cfff';
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+            ctx.stroke();
+            ctx.restore();
           }
         }
       }
