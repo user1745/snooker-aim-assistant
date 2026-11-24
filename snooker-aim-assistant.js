@@ -8551,7 +8551,10 @@
             }
             // 出杆击球走位中：母球走位预测线持续 100% 独占保留，直到全台所有球完全停稳！目标球落袋绝不退出！
             const basePred = _lastShotPred || _lastFullPred;
-            const predToDraw = (basePred && basePred.cuePost)
+            const baseHasCushion = Boolean(basePred && basePred.cuePost &&
+              basePred.cuePost.cueCushionPaths && basePred.cuePost.cueCushionPaths[0] &&
+              basePred.cuePost.cueCushionPaths[0].length >= 2);
+            const predToDraw = baseHasCushion
               ? basePred
               : ((!_lastCueCushionPred || (basePred && basePred.target))
                 ? basePred
