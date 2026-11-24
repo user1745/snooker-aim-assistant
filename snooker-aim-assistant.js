@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.10
+// @version      1.9.11
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.10';
+  const SCRIPT_VERSION = '1.9.11';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -66,6 +66,9 @@
     // 冻结快照只用于目标球吃库反弹线，避免该线跟随目标球移动。
     retainShotAssistLines: true,
     retainedShotLineAlpha: 0.72,
+    // v1.9.11：上一杆目标球反弹线作为历史参考，压到较低透明度，
+    // 避免和当前瞄准的实时反弹线同亮度造成误读。
+    retainedTargetReboundAlpha: 0.34,
 
     // 官方物理引擎仿真微推演 (在击打目标球时提供真实母球划弧走位与多库反弹)
     engineSimEnabled: true,
@@ -5605,6 +5608,9 @@
       aimDir: d,
       target: null,
       balls: allBalls,
+      // v1.9.11：把本帧使用的运行时球心边界随预测一起带走，
+      // 绘制层裁剪必须和微模拟/首库计算使用同一组边界，不能退回静态 CONFIG。
+      tableBounds: { boundX, boundY, cushionX, cushionY },
       activeBallCount: objects.length,
       physics: false,
       shot: {
@@ -5779,9 +5785,9 @@
           try {
             const livePhy = getLivePhysicsOverrides();
             const targetVertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
-            const initialPower = effPower > 2
-              ? effPower
-              : (aim && Number(aim.power) > 2 ? Number(aim.power) : 50);
+            // v1.9.11：静态瞄准阶段 state.power 往往为 0，不能再用固定的 50%
+            // 伪造出一条“看起来能走到”的目标球反弹线；只有玩家真正给到力度才推演。
+            const initialPower = effPower > 2 ? effPower : 0;
             const maxTip = Math.max(1e-6, Number(livePhy.maxTipOffsetRatio) || CONFIG.maxTipOffsetRatio);
             const tipMag = Math.min(1, Math.hypot(Number(tip.x) || 0, Number(tip.y) || 0) / maxTip);
             const maxTipRet = Number.isFinite(Number(livePhy.maxTipSpeedRetention))
@@ -5793,7 +5799,7 @@
               * resolveV3ElevationRetention(targetVertAngle);
             // v1.9.4：先把母球从当前位置推进到接触点 G，得到碰撞瞬间的 v/ω；
             // 不能把出杆初速直接当作碰球速度。
-            const cueArrival = simulateCueArrivalAtContact(
+            const cueArrival = initialPower > 0 ? simulateCueArrivalAtContact(
               cue.pos,
               G,
               d,
@@ -5804,7 +5810,7 @@
                 dtMs: CONFIG.targetMicroDtMs,
                 maxSteps: CONFIG.targetMaxSteps,
               }
-            );
+            ) : null;
             const impactSpeed = cueArrival ? cueArrival.speed : 0;
             const impact = impactSpeed > 0
               ? resolveTargetBallImpactState(
@@ -5817,6 +5823,9 @@
                 cueArrival
               )
               : null;
+            if (initialPower <= 0 && targetReboundDebug.reason === 'rail') {
+              targetReboundDebug.reason = 'no-power';
+            }
 
             if (impact) {
               const sim = simulateTargetCushionPath(
@@ -6585,15 +6594,115 @@
     return pred;
   }
 
-  // 深拷贝为独立的绘制数据；绝不能把游戏球对象/位置引用留给冻结层。
+  // v1.9.11：冻结快照只保留绘制/UI需要的纯数据字段，绝不把游戏球对象
+  // （可能带 Three.js mesh / 循环引用）整体 structuredClone，避免克隆失败后
+  // 目标球反弹线在出杆瞬间直接消失。
+  function snapshotPoint(p) {
+    if (!p || typeof p !== 'object') return null;
+    const x = Number(p.x);
+    const y = Number(p.y);
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  }
+
+  function snapshotPoints(list) {
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const p of list) {
+      const q = snapshotPoint(p);
+      if (q) out.push(q);
+    }
+    return out;
+  }
+
+  function snapshotBall(ball) {
+    if (!ball || typeof ball !== 'object') return null;
+    const out = {
+      id: ball.id != null ? ball.id : null,
+      kind: ball.kind,
+    };
+    const pos = snapshotPoint(ball.pos);
+    if (pos) out.pos = pos;
+    if (Number.isFinite(Number(ball.radius))) out.radius = Number(ball.radius);
+    const vel = snapshotPoint(ball.vel);
+    if (vel) out.vel = vel;
+    if (ball.omega && Number.isFinite(Number(ball.omega.x))) {
+      out.omega = { x: Number(ball.omega.x), y: Number(ball.omega.y), z: Number(ball.omega.z) };
+    }
+    return out;
+  }
+
+  function snapshotReboundSegments(list) {
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const seg of list) {
+      if (!seg) continue;
+      const from = snapshotPoint(seg.from || seg.p1);
+      const to = snapshotPoint(seg.to || seg.p2);
+      if (!from || !to) continue;
+      out.push({ from, to, axis: seg.axis || null });
+    }
+    return out.length ? out : null;
+  }
+
+  function buildRetainedSnapshot(pred) {
+    if (!pred) return null;
+    const t = pred.target || null;
+    const target = t ? {
+      ball: snapshotBall(t.ball),
+      contact: snapshotPoint(t.contact),
+      objectDir: snapshotPoint(t.objectDir),
+      objectPath: snapshotPoints(t.objectPath),
+      objectEnd: snapshotPoint(t.objectEnd),
+      reboundSegments: snapshotReboundSegments(t.reboundSegments),
+      reboundMeta: t.reboundMeta ? { ...t.reboundMeta } : null,
+      reboundDebug: t.reboundDebug ? { ...t.reboundDebug } : null,
+      pocket: t.pocket ? { ...t.pocket } : null,
+      cushionHug: t.cushionHug ? { ...t.cushionHug } : null,
+      cutAngleDeg: Number.isFinite(Number(t.cutAngleDeg)) ? Number(t.cutAngleDeg) : null,
+      pathLengthMm: Number.isFinite(Number(t.pathLengthMm)) ? Number(t.pathLengthMm) : null,
+      noFirstRail: Boolean(t.noFirstRail),
+    } : null;
+    return {
+      cue: snapshotPoint(pred.cue),
+      aimDir: snapshotPoint(pred.aimDir),
+      target,
+      balls: Array.isArray(pred.balls)
+        ? pred.balls.map((b) => (b ? { id: b.id, kind: b.kind, pos: snapshotPoint(b.pos) } : null)).filter(Boolean)
+        : [],
+      activeBallCount: pred.activeBallCount,
+      physics: Boolean(pred.physics),
+      shot: pred.shot ? { ...pred.shot } : null,
+      power: pred.power,
+      tip: snapshotPoint(pred.tip),
+      cuePost: pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths)
+        ? { cueCushionPaths: pred.cuePost.cueCushionPaths.map((p) => snapshotPoints(p)).filter(Boolean) }
+        : null,
+      cuePostTrajectory: snapshotPoints(pred.cuePostTrajectory),
+      noTargetEnd: snapshotPoint(pred.noTargetEnd),
+      railHit: pred.railHit ? {
+        t: pred.railHit.t,
+        axis: pred.railHit.axis,
+        normal: snapshotPoint(pred.railHit.normal),
+        point: snapshotPoint(pred.railHit.point),
+      } : null,
+      unreachable: Boolean(pred.unreachable),
+      cuePottedWarning: Boolean(pred.cuePottedWarning),
+      enginePotted: Boolean(pred.enginePotted),
+      insufficientPower: Boolean(pred.insufficientPower),
+      recPower: pred.recPower,
+      tableBounds: pred.tableBounds ? { ...pred.tableBounds } : null,
+    };
+  }
+
   function freezeRetainedPrediction(pred) {
     if (!pred) return null;
+    const snapshot = buildRetainedSnapshot(pred);
     try {
-      if (typeof structuredClone === 'function') return structuredClone(pred);
-      return JSON.parse(JSON.stringify(pred));
+      if (typeof structuredClone === 'function') return structuredClone(snapshot);
+      return JSON.parse(JSON.stringify(snapshot));
     } catch (_) {
       try {
-        return JSON.parse(JSON.stringify(pred));
+        return JSON.parse(JSON.stringify(snapshot));
       } catch (__) {
         return null;
       }
@@ -7850,7 +7959,7 @@
 
     // 台面投影四边形裁剪。没有这层裁剪时，即使投影点只是正常越界，
     // 线也会画到场景 canvas 上方的观众席、黑色背景和 HUD 区域。
-    tableClipPoints() {
+    tableClipPoints(bounds = null) {
       const source = projection.source;
       // v1.9.8：homography 回退投影也有明确的台面四角，同样可以做台面裁剪；
       // 只有完全没有投影源时才跳过，避免投影切换帧出现无裁剪长线。
@@ -7860,8 +7969,11 @@
       // railBound 是扣除球半径后的球心活动边界，目标球/母球吃库接触点在它外侧
       // 一个球半径的位置；若按 railBound 裁剪，绿线端点和蓝色反弹线起点会被各裁掉
       // 约一个球半径的屏幕投影，导致两线在库边处出现可见断口。
-      const bx = Number(CONFIG.railBoundX) + BALL_RADIUS_MM;
-      const by = Number(CONFIG.railBoundY) + BALL_RADIUS_MM;
+      // v1.9.11：优先使用本次预测携带的运行时边界，和微模拟/首库计算保持一致。
+      const runtimeX = Number(bounds && bounds.boundX);
+      const runtimeY = Number(bounds && bounds.boundY);
+      const bx = (Number.isFinite(runtimeX) && runtimeX > 0 ? runtimeX : Number(CONFIG.railBoundX)) + BALL_RADIUS_MM;
+      const by = (Number.isFinite(runtimeY) && runtimeY > 0 ? runtimeY : Number(CONFIG.railBoundY)) + BALL_RADIUS_MM;
       if (!Number.isFinite(bx) || !Number.isFinite(by) || bx <= 0 || by <= 0) return null;
 
       const corners = [
@@ -7915,8 +8027,8 @@
       return hull;
     },
 
-    clipToTable(ctx) {
-      const pts = this.tableClipPoints();
+    clipToTable(ctx, bounds = null) {
+      const pts = this.tableClipPoints(bounds);
       if (!pts || !ctx) return false;
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
@@ -8068,8 +8180,9 @@
     // v1.9.10：冻结层只保留目标球吃库反弹线；白线、绿线、母球吃库线、落位线
     // 不进入冻结层，停球后由静态层清除，避免旧线残留到下一杆。
     drawRetainedLines(pred, options = {}) {
-      if (!pred || !this.ctx) return;
+      if (!pred || !this.ctx) return [];
       const ctx = this.ctx;
+      const collected = [];
       const showWhite = options.white !== false;
       const showGreen = options.green !== false;
       const showCueCushion = options.cueCushion !== false;
@@ -8078,13 +8191,18 @@
       const alpha = Number.isFinite(Number(CONFIG.retainedShotLineAlpha))
         ? CONFIG.retainedShotLineAlpha
         : 0.72;
-      const drawPath = (points, color, width, dash) => {
+      const targetAlpha = Number.isFinite(Number(options.targetAlpha))
+        ? Number(options.targetAlpha)
+        : (Number.isFinite(Number(CONFIG.retainedTargetReboundAlpha))
+          ? CONFIG.retainedTargetReboundAlpha
+          : alpha);
+      const drawPath = (points, color, width, dash, alphaOverride) => {
         if (!Array.isArray(points) || points.length < 2) return;
         const proj = this.projectPolyline(points, pred.cue);
         if (!proj || !proj.segments || proj.segments.length === 0) return;
         ctx.save();
-        ctx.globalAlpha = alpha;
-        this.clipToTable(ctx);
+        ctx.globalAlpha = Number.isFinite(Number(alphaOverride)) ? Number(alphaOverride) : alpha;
+        this.clipToTable(ctx, pred.tableBounds);
         ctx.strokeStyle = color;
         ctx.lineWidth = width;
         ctx.lineCap = 'round';
@@ -8094,6 +8212,9 @@
         for (const seg of proj.segments) {
           ctx.moveTo(seg[0].x, seg[0].y);
           ctx.lineTo(seg[1].x, seg[1].y);
+          // v1.9.11：保留线的投影段也要进入遮挡挖洞集合，
+          // 否则旧目标球反弹线会直接压在母球/目标球/其他球上。
+          collected.push(seg);
         }
         ctx.stroke();
         ctx.restore();
@@ -8118,12 +8239,14 @@
       }
       // 目标球吃库反弹折线
       if (showTargetRebound && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments)) {
+        const boundX = Number(pred.tableBounds && pred.tableBounds.boundX) || CONFIG.railBoundX;
+        const boundY = Number(pred.tableBounds && pred.tableBounds.boundY) || CONFIG.railBoundY;
         for (const seg of t.reboundSegments) {
           const p1 = seg && (seg.p1 || seg.from);
           const p2 = seg && (seg.p2 || seg.to);
           if (!p1 || !p2) continue;
-          // v1.9.8：先裁到球心有效台面，再按 50mm 采样投影，避免整台长段被投影保护丢弃。
-          const clipped = clipSegmentToTableRect(p1, p2, CONFIG.railBoundX, CONFIG.railBoundY);
+          // v1.9.11：裁剪边界和本次预测的运行时球心边界保持一致。
+          const clipped = clipSegmentToTableRect(p1, p2, boundX, boundY);
           if (!clipped) continue;
           let dash = [];
           if (t.objectDir) {
@@ -8139,7 +8262,7 @@
             [clipped.from, clipped.to],
             CONFIG.targetReboundSampleStepMm || 50
           );
-          drawPath(sampled, CONFIG.cueCushionReboundColor || '#86cfff', CONFIG.objectLineWidthPx || 1.6, dash);
+          drawPath(sampled, CONFIG.cueCushionReboundColor || '#86cfff', CONFIG.objectLineWidthPx || 1.6, dash, targetAlpha);
         }
       }
       // 母球落位预测线 / 碰后走位线
@@ -8150,6 +8273,7 @@
           CONFIG.cuePostTrajectoryWidthPx || 1.6
         );
       }
+      return collected;
     },
 
     drawPrediction(pred, currentBalls = null, inMotion = false, retainedPred = null, options = {}) {
@@ -8170,15 +8294,22 @@
         retainedCuePost: options.retainedCuePost !== false,
       };
       this.clear();
+      // v1.9.11：先建立本帧遮挡集合，冻结层的投影段也会被注册进来；
+      // 后面的 maskOccludingBalls 才能同时对“上一杆旧线”做球体挖洞。
+      const drawnSegments = [];
       if (retainedPred && CONFIG.retainShotAssistLines) {
         // 旧的冻结线先画在底层，当前瞄准线再画在上面；下一杆出杆时旧快照才被替换。
-        this.drawRetainedLines(retainedPred, {
+        const retainedSegments = this.drawRetainedLines(retainedPred, {
           white: lineOptions.retainedWhite,
           green: lineOptions.retainedGreen,
           cueCushion: lineOptions.retainedCueCushion,
           targetRebound: lineOptions.retainedTargetRebound,
           cuePost: lineOptions.retainedCuePost,
-        });
+          // 运动中这条冻结线就是本杆唯一的反弹预测，保持原亮度；
+          // 静态瞄准时才把它当“上一杆历史线”压低透明度。
+          targetAlpha: inMotion ? CONFIG.retainedShotLineAlpha : undefined,
+        }) || [];
+        for (const seg of retainedSegments) drawnSegments.push(seg);
       }
       if (!pred) {
         hudPill.hide();
@@ -8283,9 +8414,8 @@
         }
       }
 
-      const drawnSegments = [];
       let ghostPx = null;
-      let hasProjected = false;
+      let hasProjected = drawnSegments.length > 0;
 
       // 1) 母球瞄准线：静态预览全长绘制；出杆后随母球向前移动逐步擦除，撞击目标球瞬间完全消失
       if (lineOptions.liveWhite && CONFIG.showCueLine) {
@@ -8331,7 +8461,7 @@
             if (lineProj.segments.length > 0) {
               hasProjected = true;
               ctx.save();
-              this.clipToTable(ctx);
+              this.clipToTable(ctx, pred.tableBounds);
               ctx.strokeStyle = CONFIG.cueLineColor;
               ctx.lineWidth = CONFIG.cueLineWidthPx;
               ctx.lineCap = 'round';
@@ -8371,7 +8501,7 @@
           if (objectProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
-            this.clipToTable(ctx);
+            this.clipToTable(ctx, pred.tableBounds);
             if (isUnderpowered) {
               ctx.strokeStyle = '#ff9f43';
               ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
@@ -8405,7 +8535,7 @@
           if (cueCushionProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
-            this.clipToTable(ctx);
+            this.clipToTable(ctx, pred.tableBounds);
             ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff'; // '#86cfff' 天蓝色
             ctx.lineWidth = CONFIG.cueCushionReboundWidthPx || 1.6;     // 1.6px (与绿色瞄准线一致)
             ctx.lineCap = 'round';
@@ -8426,6 +8556,8 @@
       // 3.2) 【目标球吃库反弹折线】：静态预览全长；出杆后目标球吃库线保持冻结，不随实时球位裁剪。
       if (lineOptions.liveTargetRebound && CONFIG.showObjectRebound && t && Array.isArray(t.reboundSegments) && t.reboundSegments.length > 0) {
         let objectReboundSegments = t.reboundSegments;
+        const reboundBoundX = Number(pred.tableBounds && pred.tableBounds.boundX) || CONFIG.railBoundX;
+        const reboundBoundY = Number(pred.tableBounds && pred.tableBounds.boundY) || CONFIG.railBoundY;
         if (inMotion) {
           const trimmedReboundPath = trimTargetReboundFromLive(t.reboundSegments, liveTargetPos, liveTargetPotted);
           objectReboundSegments = [];
@@ -8445,7 +8577,8 @@
             const p2 = seg && (seg.p2 || seg.to);
             if (!p1 || !p2) continue;
             // v1.9.8：与冻结层一致，先裁到球心台面，再采样投影。
-            const clipped = clipSegmentToTableRect(p1, p2, CONFIG.railBoundX, CONFIG.railBoundY);
+            // v1.9.11：球心台面使用本次预测的运行时边界，和微模拟保持一致。
+            const clipped = clipSegmentToTableRect(p1, p2, reboundBoundX, reboundBoundY);
             if (!clipped) continue;
             const sampled = samplePolylineByDistance(
               [clipped.from, clipped.to],
@@ -8455,7 +8588,7 @@
             if (reboundProj.segments.length > 0) {
               hasProjected = true;
               ctx.save();
-              this.clipToTable(ctx);
+              this.clipToTable(ctx, pred.tableBounds);
               ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff';
               ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
               ctx.lineCap = 'round';
@@ -8490,7 +8623,7 @@
         if (cuePostProj.segments.length > 0) {
           hasProjected = true;
           ctx.save();
-          this.clipToTable(ctx);
+          this.clipToTable(ctx, pred.tableBounds);
           ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || CONFIG.cueLineColor || 'rgba(255, 255, 255, 0.95)';
           ctx.lineWidth = CONFIG.cuePostTrajectoryWidthPx || 1.6;
           ctx.lineCap = 'round';
@@ -10028,9 +10161,12 @@
       }
 
       const pred = attachShotPowerMetrics(_lastGeomPred, state);
-      // v1.9.9：只要存在上一杆冻结快照，静态瞄准阶段就只画快照里的目标球反弹线。
-      // 不再把当前瞄准方向的实时目标反弹线叠加上去；下一杆出杆时才换新快照。
-      const retainedTargetPred = _retainedShotPred && CONFIG.retainShotAssistLines
+      // v1.9.11：静态瞄准阶段始终恢复当前瞄准方向的实时目标球反弹线；
+      // 上一杆快照只作为低透明度历史参考，绝不能再把当前预览压掉。
+      const retainedTargetPred = (_retainedShotPred &&
+        CONFIG.retainShotAssistLines &&
+        Array.isArray(_retainedShotPred.target?.reboundSegments) &&
+        _retainedShotPred.target.reboundSegments.length > 0)
         ? _retainedShotPred
         : null;
       const didDraw = overlay.drawPrediction(
@@ -10042,8 +10178,8 @@
           liveWhite: true,
           liveGreen: true,
           liveCueCushion: true,
-          // 有上一杆结果线时禁用实时目标反弹；没有冻结快照时才恢复瞄准预览。
-          liveTargetRebound: !retainedTargetPred,
+          // 当前瞄准的反弹线始终实时绘制；旧线由 retainedTargetRebound 单独以低 alpha 保留。
+          liveTargetRebound: true,
           liveCuePost: true,
           retainedWhite: false,
           retainedGreen: false,
