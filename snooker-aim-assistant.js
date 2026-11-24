@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.8.1
+// @version      1.8.2
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.8.1';
+  const SCRIPT_VERSION = '1.8.2';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -5951,11 +5951,15 @@
   let _cueLineCompleted = false;
   let _targetLineCompleted = false;
   let _targetMaxTravel = 0;
+  let _cueCushionCompleted = false;
+  let _cueCushionMaxTravel = 0;
   let _trackedTargetBallId = null;
   let _trackedTargetPos = null;
 
   function resetCueMotionState() {
     _cueLineCompleted = false;
+    _cueCushionCompleted = false;
+    _cueCushionMaxTravel = 0;
   }
 
   function resetTargetMotionState() {
@@ -6395,6 +6399,81 @@
   }
 
   /**
+   * 母球吃库反弹折线动态擦除：
+   * 路径起点为第一库接触点。母球到达第一库前保持全段；
+   * 过第一库后，折线起点跟随母球实时位置向后吞噬；
+   * 母球接近第二库终点或偏离路径过大时终结。
+   */
+  function trimCueCushionPathFromLive(originalPath, liveCuePos) {
+    if (!Array.isArray(originalPath) || originalPath.length < 2) return null;
+    if (_cueCushionCompleted) return null;
+
+    const endPt = originalPath[originalPath.length - 1];
+
+    if (!liveCuePos) return originalPath;
+
+    let bestSegmentIdx = -1;
+    let bestDistSq = Infinity;
+    let accumulatedLen = 0;
+    let projTravel = 0;
+    let totalLen = 0;
+
+    for (let i = 0; i < originalPath.length - 1; i++) {
+      const p1 = originalPath[i];
+      const p2 = originalPath[i + 1];
+      const segDx = p2.x - p1.x;
+      const segDy = p2.y - p1.y;
+      const segLen = Math.hypot(segDx, segDy);
+      if (segLen < 1e-4) continue;
+
+      let t = ((liveCuePos.x - p1.x) * segDx + (liveCuePos.y - p1.y) * segDy) / (segLen * segLen);
+      t = clamp(t, 0, 1);
+      const projX = p1.x + t * segDx;
+      const projY = p1.y + t * segDy;
+      const dSq = (liveCuePos.x - projX) ** 2 + (liveCuePos.y - projY) ** 2;
+
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestSegmentIdx = i;
+        projTravel = accumulatedLen + t * segLen;
+      }
+      accumulatedLen += segLen;
+    }
+    totalLen = accumulatedLen;
+
+    if (projTravel > _cueCushionMaxTravel) {
+      _cueCushionMaxTravel = projTravel;
+    }
+
+    // 异常折返：母球沿折线大幅倒退，直接终结，避免残线重新出现。
+    if (_cueCushionMaxTravel > 60 && projTravel < _cueCushionMaxTravel - 15) {
+      _cueCushionCompleted = true;
+      return null;
+    }
+
+    // 母球还在飞向第一库：投影会钳制在路径起点，保持完整两库折线。
+    if (projTravel <= 5) return originalPath;
+
+    // 过第一库后明显偏离预测反弹路径（例如撞到中途球或被实际物理修正）。
+    if (bestDistSq > 70 * 70 && projTravel > 20) {
+      _cueCushionCompleted = true;
+      return null;
+    }
+
+    if (bestSegmentIdx < 0) {
+      _cueCushionCompleted = true;
+      return null;
+    }
+
+    // 从母球实时位置开始保留尚未走过的折线，形成白线/绿线同款单向吞噬。
+    const trimmed = [{ x: liveCuePos.x, y: liveCuePos.y }];
+    for (let i = bestSegmentIdx + 1; i < originalPath.length; i++) {
+      trimmed.push({ x: originalPath[i].x, y: originalPath[i].y });
+    }
+    return trimmed.length >= 2 ? trimmed : null;
+  }
+
+  /**
    * 计算目标球瞄准折线/直线随目标球向前行进的动态裁剪折线：
    * 目标球被撞动前（母球飞行阶段），100% 完整全长保留；
    * 目标球受撞向前行进时，起点跟随目标球推进，后方路径动态擦除；
@@ -6781,6 +6860,8 @@
         _cueLineCompleted = false;
         _targetLineCompleted = false;
         _targetMaxTravel = 0;
+        _cueCushionCompleted = false;
+        _cueCushionMaxTravel = 0;
         _trackedTargetBallId = null;
         _trackedTargetPos = null;
       }
@@ -6948,9 +7029,12 @@
         }
       }
 
-      // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px (击球全程100%保留显示)
+      // 3) 【母球吃库反弹折线】：天蓝色 #86cfff，实线 1.6px。出杆后按母球实时位置单向擦除。
       if (CONFIG.showCushionRebound && pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) && pred.cuePost.cueCushionPaths.length > 0) {
-        const cPath = pred.cuePost.cueCushionPaths[0];
+        let cPath = pred.cuePost.cueCushionPaths[0];
+        if (inMotion) {
+          cPath = trimCueCushionPathFromLive(cPath, liveCuePos);
+        }
         if (Array.isArray(cPath) && cPath.length >= 2) {
           const pxPts = cPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
           if (pxPts.length >= 2) {
@@ -8497,13 +8581,15 @@
       _lastFullPred = pred;
       if (pred && pred.cue) {
         const hasValidTrajectory = Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2;
+        const hasCushionPath = Boolean(pred.cuePost && Array.isArray(pred.cuePost.cueCushionPaths) &&
+          pred.cuePost.cueCushionPaths[0] && pred.cuePost.cueCushionPaths[0].length >= 2);
         const curPower = Math.max(0, Math.round(Number(pred.shot?.power ?? pred.power ?? 0)));
         const isDifferentAim = !_lastShotPred ||
           _lastShotPred.target?.ball?.id !== pred.target?.ball?.id ||
           Math.hypot((_lastShotPred.cue?.x || 0) - pred.cue.x, (_lastShotPred.cue?.y || 0) - pred.cue.y) > 20;
 
         // 缓存有效瞄准预测快照，供出杆击球过程中持续保留绘制
-        if (isDifferentAim || hasValidTrajectory || curPower > 2 || !_lastShotPred || !Array.isArray(_lastShotPred.cuePostTrajectory)) {
+        if (isDifferentAim || hasValidTrajectory || hasCushionPath || curPower > 2 || !_lastShotPred || !Array.isArray(_lastShotPred.cuePostTrajectory)) {
           _lastShotPred = pred;
         }
       }
