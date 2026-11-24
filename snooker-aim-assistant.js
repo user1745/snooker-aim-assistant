@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.8.4
+// @version      1.8.5
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.8.4';
+  const SCRIPT_VERSION = '1.8.5';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -6722,6 +6722,138 @@
       return { x: s.x - this.rect.left, y: s.y - this.rect.top };
     },
 
+    // v1.8.5：相机后方/近平面投影会产生有限但极大的坐标，必须在进入 Canvas 前拦截，
+    // 否则一条跨越相机平面的折线会被画成横贯整个画面的错误长线。
+    projectedScreenLimit() {
+      const rect = this.rect;
+      const w = Math.max(1, rect ? rect.width : (window.innerWidth || 1));
+      const h = Math.max(1, rect ? rect.height : (window.innerHeight || 1));
+      return Math.max(w, h) * 4;
+    },
+
+    isSafeProjectedPoint(s) {
+      if (!s || !Number.isFinite(s.x) || !Number.isFinite(s.y)) return false;
+      const limit = this.projectedScreenLimit();
+      return Math.abs(s.x) <= limit && Math.abs(s.y) <= limit;
+    },
+
+    // 将世界坐标路径投影为若干条安全线段：
+    // 1) 投影点非有限或坐标极大（相机后方/近平面）时断开；
+    // 2) 相邻两个投影点发生异常大跳变时断开；
+    // 3) 返回 endValid，供白线终点假想球判断，避免在无效终点继续绘制假想球。
+    projectPolyline(points, refPos, options = {}) {
+      const list = Array.isArray(points) ? points : [];
+      const rect = this.rect;
+      const baseSize = Math.max(
+        rect ? rect.width : (window.innerWidth || 1),
+        rect ? rect.height : (window.innerHeight || 1)
+      );
+      const maxStep = options.maxStepPx || baseSize * 3;
+      const segments = [];
+      let last = null;
+      let endValid = false;
+      let truncated = false;
+
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i];
+        if (!p) {
+          last = null;
+          truncated = true;
+          continue;
+        }
+        const s = this.localCloth(p, refPos);
+        if (!this.isSafeProjectedPoint(s)) {
+          last = null;
+          truncated = true;
+          continue;
+        }
+        if (last) {
+          const jump = Math.hypot(s.x - last.x, s.y - last.y);
+          if (jump > maxStep) {
+            truncated = true;
+            last = s;
+            continue;
+          }
+          segments.push([last, s]);
+        }
+        last = s;
+        if (i === list.length - 1) endValid = true;
+      }
+      return { segments, endValid, truncated };
+    },
+
+    // 台面投影四边形裁剪。没有这层裁剪时，即使投影点只是正常越界，
+    // 线也会画到场景 canvas 上方的观众席、黑色背景和 HUD 区域。
+    tableClipPoints() {
+      const source = projection.source;
+      if (source !== 'threeGame' && source !== 'internal') return null;
+      if (!this.rect) return null;
+      const bx = Number(CONFIG.railBoundX);
+      const by = Number(CONFIG.railBoundY);
+      if (!Number.isFinite(bx) || !Number.isFinite(by) || bx <= 0 || by <= 0) return null;
+
+      const corners = [
+        { x: -bx, y: -by },
+        { x: bx, y: -by },
+        { x: bx, y: by },
+        { x: -bx, y: by },
+      ];
+      const pts = [];
+      const limit = Math.max(this.rect.width, this.rect.height) * 12;
+      for (const corner of corners) {
+        const s = this.localCloth(corner, { x: 0, y: 0 });
+        if (!s || !Number.isFinite(s.x) || !Number.isFinite(s.y)) return null;
+        if (Math.abs(s.x) > limit || Math.abs(s.y) > limit) return null;
+        pts.push(s);
+      }
+
+      // 透视投影后的台面四点顺序可能随视角翻转（例如 top 视角 x 轴在屏幕上反向），
+      // 直接按世界坐标顺序连边会形成自交的“蝴蝶结”。这里用凸包恢复简单四边形。
+      const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+      const sorted = pts.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
+      const lower = [];
+      for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+        lower.push(p);
+      }
+      const upper = [];
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+        upper.push(p);
+      }
+      const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+      if (hull.length !== 4) return null;
+
+      // 视角切换过渡期间偶尔会拿到一帧方向错误的投影，四个角虽然有限，
+      // 但围出的四边形已经不在台面中心附近。这种情况下退回仅 canvas 裁剪，
+      // 避免用错误四边形把整条瞄准线裁没。
+      const center = this.localCloth({ x: 0, y: 0 }, { x: 0, y: 0 });
+      if (!this.isSafeProjectedPoint(center)) return null;
+      let centerSign = 0;
+      for (let i = 0; i < hull.length; i++) {
+        const a = hull[i];
+        const b = hull[(i + 1) % hull.length];
+        const side = (b.x - a.x) * (center.y - a.y) - (b.y - a.y) * (center.x - a.x);
+        if (Math.abs(side) < 1e-4) continue;
+        const s = side > 0 ? 1 : -1;
+        if (centerSign && s !== centerSign) return null;
+        centerSign = s;
+      }
+      return hull;
+    },
+
+    clipToTable(ctx) {
+      const pts = this.tableClipPoints();
+      if (!pts || !ctx) return false;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.clip();
+      return true;
+    },
+
     getBallScreenCircle(ballPos) {
       if (!ballPos) return null;
       const center = this.localScreen(ballPos);
@@ -6805,7 +6937,7 @@
           x: worldPos.x + BALL_RADIUS_MM * Math.cos(theta),
           y: worldPos.y + BALL_RADIUS_MM * Math.sin(theta),
         }, refPos);
-        if (!pt) continue;
+        if (!pt || !this.isSafeProjectedPoint(pt)) { validPts = 0; break; }
         if (validPts === 0) ctx.moveTo(pt.x, pt.y);
         else ctx.lineTo(pt.x, pt.y);
         validPts++;
@@ -6836,7 +6968,7 @@
           x: worldPos.x + BALL_RADIUS_MM * Math.cos(theta),
           y: worldPos.y + BALL_RADIUS_MM * Math.sin(theta),
         }, refPos);
-        if (!pt) continue;
+        if (!pt || !this.isSafeProjectedPoint(pt)) { validPts = 0; break; }
         if (validPts === 0) ctx.moveTo(pt.x, pt.y);
         else ctx.lineTo(pt.x, pt.y);
         validPts++;
@@ -6993,25 +7125,43 @@
           }
 
           if (startPt && endPt) {
-            const startPx = this.localCloth(startPt, cueWorld);
+            // v1.8.5：白线不能只投影两个端点。端点一旦越过相机近平面，
+            // 两端会得到有限但巨大的坐标，直接连成横贯画面的错误长线。
+            // 这里沿线采样并分段校验，异常段断线，但保留仍可见的段。
+            const lineDist = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
+            const sampleCount = Math.max(2, Math.min(40, Math.ceil(lineDist / 35)));
+            const samplePts = [startPt];
+            for (let i = 1; i < sampleCount - 1; i++) {
+              const t = i / (sampleCount - 1);
+              samplePts.push({
+                x: startPt.x + (endPt.x - startPt.x) * t,
+                y: startPt.y + (endPt.y - startPt.y) * t,
+              });
+            }
+            samplePts.push(endPt);
+
+            const lineProj = this.projectPolyline(samplePts, cueWorld);
             const endPx = this.localCloth(endPt, cueWorld);
-            if (startPx && endPx) {
+            if (lineProj.segments.length > 0) {
               hasProjected = true;
               ctx.save();
+              this.clipToTable(ctx);
               ctx.strokeStyle = CONFIG.cueLineColor;
               ctx.lineWidth = CONFIG.cueLineWidthPx;
               ctx.lineCap = 'round';
               ctx.setLineDash([]);
               ctx.beginPath();
-              ctx.moveTo(startPx.x, startPx.y);
-              ctx.lineTo(endPx.x, endPx.y);
+              for (const seg of lineProj.segments) {
+                ctx.moveTo(seg[0].x, seg[0].y);
+                ctx.lineTo(seg[1].x, seg[1].y);
+                drawnSegments.push(seg);
+              }
               ctx.stroke();
               ctx.restore();
 
-              drawnSegments.push([startPx, endPx]);
-
-              // 绘制假想球：有目标球时在目标接触点；直吃库边时在第一库接触点
-              if (showGhost && contactTarget) {
+              // 假想球单独绘制，避免被台面裁剪切掉第一库接触点半圆。
+              if (showGhost && contactTarget && lineProj.endValid &&
+                  endPx && this.isSafeProjectedPoint(endPx)) {
                 this.drawGhostBall(contactTarget, cueWorld);
                 ghostPx = endPx;
               }
@@ -7030,11 +7180,12 @@
 
         if (pathToDraw && pathToDraw.length >= 2) {
           const isUnderpowered = currentEffPower > 2 && Boolean(pred.insufficientPower);
-          const pxPts = pathToDraw.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
+          const objectProj = this.projectPolyline(pathToDraw, cueWorld);
 
-          if (pxPts.length >= 2) {
+          if (objectProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
+            this.clipToTable(ctx);
             if (isUnderpowered) {
               ctx.strokeStyle = '#ff9f43';
               ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
@@ -7047,10 +7198,10 @@
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
             ctx.beginPath();
-            ctx.moveTo(pxPts[0].x, pxPts[0].y);
-            for (let i = 1; i < pxPts.length; i++) {
-              ctx.lineTo(pxPts[i].x, pxPts[i].y);
-              drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+            for (const seg of objectProj.segments) {
+              ctx.moveTo(seg[0].x, seg[0].y);
+              ctx.lineTo(seg[1].x, seg[1].y);
+              drawnSegments.push(seg);
             }
             ctx.stroke();
             ctx.restore();
@@ -7065,20 +7216,21 @@
           cPath = trimCueCushionPathFromLive(cPath, liveCuePos);
         }
         if (Array.isArray(cPath) && cPath.length >= 2) {
-          const pxPts = cPath.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
-          if (pxPts.length >= 2) {
+          const cueCushionProj = this.projectPolyline(cPath, cueWorld);
+          if (cueCushionProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
+            this.clipToTable(ctx);
             ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff'; // '#86cfff' 天蓝色
             ctx.lineWidth = CONFIG.cueCushionReboundWidthPx || 1.6;     // 1.6px (与绿色瞄准线一致)
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
             ctx.setLineDash([]); // 实线显示
             ctx.beginPath();
-            ctx.moveTo(pxPts[0].x, pxPts[0].y);
-            for (let i = 1; i < pxPts.length; i++) {
-              ctx.lineTo(pxPts[i].x, pxPts[i].y);
-              drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+            for (const seg of cueCushionProj.segments) {
+              ctx.moveTo(seg[0].x, seg[0].y);
+              ctx.lineTo(seg[1].x, seg[1].y);
+              drawnSegments.push(seg);
             }
             ctx.stroke();
             ctx.restore();
@@ -7092,42 +7244,45 @@
           const p1 = seg && (seg.p1 || seg.from);
           const p2 = seg && (seg.p2 || seg.to);
           if (!p1 || !p2) continue;
-          const px1 = this.localCloth(p1, cueWorld);
-          const px2 = this.localCloth(p2, cueWorld);
-          if (px1 && px2) {
+          const reboundProj = this.projectPolyline([p1, p2], cueWorld);
+          if (reboundProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
+            this.clipToTable(ctx);
             ctx.strokeStyle = CONFIG.cueCushionReboundColor || '#86cfff';
             ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
             ctx.setLineDash([]);
             ctx.beginPath();
-            ctx.moveTo(px1.x, px1.y);
-            ctx.lineTo(px2.x, px2.y);
+            for (const reboundSeg of reboundProj.segments) {
+              ctx.moveTo(reboundSeg[0].x, reboundSeg[0].y);
+              ctx.lineTo(reboundSeg[1].x, reboundSeg[1].y);
+              drawnSegments.push(reboundSeg);
+            }
             ctx.stroke();
             ctx.restore();
-            drawnSegments.push([px1, px2]);
           }
         }
       }
 
       // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线，击球走位全程100%完整保留，绝不擦除；彻底移除终点白色假想球圆圈)
       if (CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
-        const pxPts = pred.cuePostTrajectory.map((pt) => this.localCloth(pt, cueWorld)).filter(Boolean);
-        if (pxPts.length >= 2) {
+        const cuePostProj = this.projectPolyline(pred.cuePostTrajectory, cueWorld);
+        if (cuePostProj.segments.length > 0) {
           hasProjected = true;
           ctx.save();
+          this.clipToTable(ctx);
           ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || '#86cfff';
           ctx.lineWidth = CONFIG.cuePostTrajectoryWidthPx || 1.6;
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
           ctx.setLineDash([]);
           ctx.beginPath();
-          ctx.moveTo(pxPts[0].x, pxPts[0].y);
-          for (let i = 1; i < pxPts.length; i++) {
-            ctx.lineTo(pxPts[i].x, pxPts[i].y);
-            drawnSegments.push([pxPts[i - 1], pxPts[i]]);
+          for (const seg of cuePostProj.segments) {
+            ctx.moveTo(seg[0].x, seg[0].y);
+            ctx.lineTo(seg[1].x, seg[1].y);
+            drawnSegments.push(seg);
           }
           ctx.stroke();
           ctx.restore();
