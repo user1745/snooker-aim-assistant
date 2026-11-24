@@ -37,7 +37,6 @@
     // 【目标球橙色实线力度条】沿绿色瞄准线显示当前力度下目标球能走到的位置；
     // 长度与 computeTargetTravelBudgetMm()/actualReachMm 同源，终点为该力度下的预计停点。
     targetReachBarColor: '#ff9f43',
-    targetReachBarWidthPx: 3.0,
     targetReachBarMinMm: 5,
     // 进袋判定颜色 (用于信息浮标指示)：稳进高置信为绿色 #00ff88，临界/薄球/低置信为橙色 #ff8c33
     pocketRingColor: '#00ff88',
@@ -5545,8 +5544,12 @@
    * 解法：不动物理常数（会影响推荐力度、力度不足判定、母球到达速度等下游），
    * 只在显示层按「当前力度真正能把目标球推多远」做截断。
    *
-   * 公式与 attachShotPowerMetrics() 里的 actualReachMm 完全同源，保证
-   * 「蓝线长度」和「橙色实线力度条」永远用同一套口径，不会互相矛盾。
+   * 精度校准：旧版固定 transferEff=0.88 低估了碰撞传递效率；现在按官方恢复系数
+   * 计算等质量正碰后的目标球速度比 (1+e)/2，并把母球剩余自由行程与目标球速度
+   * 都通过 CUE_POWER_CURVE 反查/正查，吸收高力度段的滑-滚转换非线性。
+   *
+   * attachShotPowerMetrics() 的 actualReachMm 直接调用本函数，保证
+   * 「蓝线长度」「橙色实线力度条」「力度不足判定」永远用同一套口径。
    *
    * @param {number} power       当前有效力度 0~100
    * @param {{x:number,y:number}} tip 杆法偏移
@@ -5572,17 +5575,34 @@
     const kSidespin = 1.0 - 0.10 * (sideRatio * sideRatio);
     const spinDynamicRetention = Math.max(0.40, kBackspin * kSidespin);
 
-    // 碰撞瞬间传递给目标球的正向冲量折减
-    const transferEff = 0.88 * (1.0 - 0.10 * backspinRatio);
-
     const retention = tipSpeedRetention(tip) * resolveV3ElevationRetention(verticalAngle);
     const totalCueTravel = cueTravelByPower(p, retention) * spinDynamicRetention;
     // 母球滚到接触点途中被逆旋滑移额外吃掉的部分（等效行程损耗放大 2.7 倍）
     const sCueLoss = Math.max(0, Number(sCueToContact) || 0) * (1.0 + 1.7 * backspinRatio);
     const remainCueTravel = Math.max(0, totalCueTravel - sCueLoss);
+    if (remainCueTravel <= 0) return 0;
+
+    // 目标球碰后法向速度由等质量正碰恢复系数决定：v_target = v_cue * (1+e)/2。
+    // 旧版固定 transferEff=0.88 明显低估官方 e≈0.95 时的传递效率（(1+e)/2≈0.975，
+    // 行程按速度平方折算应约 0.95），这是橙条终点偏近、目标球多跑一段的主因。
+    const livePhy = getLivePhysicsOverrides();
+    const eRaw = Number(livePhy && livePhy.ballNormalRestitution);
+    const e = clamp(Number.isFinite(eRaw) ? eRaw : CONFIG.ballRestitution, 0, 1);
+    const collisionSpeedFactor = (1 + e) * 0.5;
 
     const cc = clamp(Number.isFinite(Number(cosCut)) ? Number(cosCut) : 1, 0.08, 1);
-    return Math.max(0, remainCueTravel * cc * cc * transferEff);
+
+    // CUE_POWER_CURVE 是官方引擎实测的「力度→自由行程」曲线，天然包含滑-滚转换
+    // 与台呢阻力的非线性。这里不假设恒定减速度，而是：
+    // 1) 把母球剩余自由行程反查成等效力度，得到碰球瞬间速度；
+    // 2) 乘上碰撞速度比与切角余弦，得到目标球碰后初速；
+    // 3) 再用同一条实测曲线反查目标球可走距离。
+    // 这样既修正了 transferEff 的系统性低估，也吸收了高力度段曲线的非线性。
+    const cuePowerAtContact = powerByCueTravel(remainCueTravel);
+    const cueSpeedAtContact = resolveCueSpeed(cuePowerAtContact);
+    const targetSpeed = cueSpeedAtContact * collisionSpeedFactor * cc;
+    const targetPowerEquiv = 100 * targetSpeed / Math.max(1, Number(CONFIG.maxCuePowerMmS) || 7000);
+    return Math.max(0, cueTravelByPower(targetPowerEquiv));
   }
 
   /**
@@ -6413,31 +6433,10 @@
 
     if (geomPred.target) {
       const sCue = V.dist(geomPred.cue, geomPred.target.contact || geomPred.target.ball.pos);
-
-      // 低杆与加塞滑动阻力动力学：真实低杆逆旋强滑移功耗模型，严防过早误报绿色实线
-      const sx = Number(tip?.x) || 0;
-      const sy = Number(tip?.y) || 0;
-      const backspinRatio = clamp(-sy / 0.5, 0, 1);
-      const topspinRatio = clamp(sy / 0.5, 0, 1);
-      const sideRatio = clamp(Math.abs(sx) / 0.5, 0, 1);
-
-      // 低杆逆旋产生高达 12~15 倍的台呢动摩擦阻力，强滑移功耗迅速耗散前向动能
-      const kBackspin = backspinRatio > 0 ? (1.0 - 0.35 * Math.pow(backspinRatio, 1.15)) : (1.0 + 0.08 * Math.pow(topspinRatio, 1.2));
-      const kSidespin = 1.0 - 0.10 * (sideRatio * sideRatio);
-      const spinDynamicRetention = Math.max(0.40, kBackspin * kSidespin);
-
-      // 碰撞瞬间传递给目标球的正向冲量折减
-      const transferEff = 0.88 * (1.0 - 0.10 * backspinRatio);
-
-      // 母球滑行途中逆旋滑动摩擦等效损耗（每毫米位移损耗放大 2.7 倍）
-      const sCueLoss = sCue * (1.0 + 1.7 * backspinRatio);
-      const totalCueTravel = cueTravelByPower(power, retention * elevRetention) * spinDynamicRetention;
-      // 母球在击中目标球瞬间剩余的真实行进能力
-      const remainCueTravel = Math.max(0, totalCueTravel - sCueLoss);
-
       const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
-      // 目标球实际可获得的最大位移能力（能量守恒：切角平方损耗与碰撞传递效率）
-      actualReachMm = remainCueTravel * (cosCut * cosCut) * transferEff;
+
+      // 与蓝线预算、橙色力度条共用同一套「力度-行程」模型，避免显示与判定口径分叉。
+      actualReachMm = computeTargetTravelBudgetMm(power, tip, vertAngle, sCue, cosCut);
 
       const targetPathLen = Number(geomPred.target.pathLengthMm) ||
         (geomPred.target.pocket ? V.dist(geomPred.target.ball.pos, geomPred.target.pocket.enterPoint || geomPred.target.pocket.opening) : 0);
@@ -9063,7 +9062,8 @@
                 ctx.save();
                 this.clipToTable(ctx, pred.tableBounds);
                 ctx.strokeStyle = CONFIG.targetReachBarColor || '#ff9f43';
-                ctx.lineWidth = CONFIG.targetReachBarWidthPx || 3;
+                // 与绿色瞄准线保持完全一致的粗细，避免覆盖时出现视觉差异。
+                ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
                 ctx.setLineDash([]);
