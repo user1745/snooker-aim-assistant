@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.0
+// @version      1.9.1
 // @description  在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.0';
+  const SCRIPT_VERSION = '1.9.1';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -6563,7 +6563,7 @@
    * 目标球吃库反弹折线的动态裁剪：
    * 目标球尚未到达第一库时保留全长；
    * 目标球进入第一库后，从其实时位置开始保留未走的反弹段；
-   * 走完预测反弹路径或明显偏离时彻底销毁，避免残留。
+   * 只有目标球落袋或真正走完预测反弹路径时才彻底销毁，避免残留。
    */
   function trimTargetReboundFromLive(segments, liveTargetPos, isTargetPotted) {
     if (!Array.isArray(segments) || segments.length === 0) return null;
@@ -6630,26 +6630,19 @@
       _targetReboundMaxTravel = projTravel;
     }
 
-    // 目标球明显偏离预测反弹路径，说明实际撞库修正/二次碰撞与预测不符。
-    if (bestDistSq > 70 * 70 && projTravel > 20) {
-      _targetReboundCompleted = true;
-      return null;
-    }
-
-    // 实际沿反弹路径发生大幅倒退，直接终结，避免残线重新出现。
-    if (_targetReboundMaxTravel > 120 && projTravel < _targetReboundMaxTravel - 15) {
-      _targetReboundCompleted = true;
-      return null;
-    }
+    // 目标球与预测反弹线存在少量横向偏差时，不再提前判定完成。
+    // 实际目标球受库边摩擦/旋转影响，轨迹不会与几何预测完全重合；
+    // 之前在这里直接 completed，会导致蓝线还没走到终点就消失。
+    // 仅保留“目标球落袋”和“真正到达路径终点”两种完成条件。
 
     if (bestSegmentIdx < 0) {
-      _targetReboundCompleted = true;
-      return null;
+      return path;
     }
 
-    // 目标球已到反弹路径终点（下一库/袋口）或剩余行程很短：整条蓝线吃完。
-    if (Math.hypot(liveTargetPos.x - endPt.x, liveTargetPos.y - endPt.y) <= 30 ||
-        accumulatedLen - projTravel <= 20) {
+    // 目标球已到反弹路径终点（下一库/袋口）。阈值收紧到 6mm，
+    // 避免球离终点还有一个球半径时就提前清空折线。
+    const distToEnd = Math.hypot(liveTargetPos.x - endPt.x, liveTargetPos.y - endPt.y);
+    if (distToEnd <= 6 || accumulatedLen - projTravel <= 6) {
       _targetReboundCompleted = true;
       return null;
     }
