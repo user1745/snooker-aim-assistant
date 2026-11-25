@@ -2084,7 +2084,7 @@
         'transform: translateY(-50%) !important;',
         'z-index: 2147483647 !important;',
         'width: 34px !important;',
-        'padding: 9px 3px 7px !important;',
+        'padding: 0 !important;',
         'box-sizing: border-box !important;',
         'border-radius: 10px !important;',
         'background: rgba(14, 28, 20, 0.94) !important;',
@@ -2153,32 +2153,49 @@
         'pointer-events: none !important;',
       ].join(' ');
 
-      const makeStepButton = (text, title) => {
+      const makeStepButton = (direction, title) => {
         const btn = doc.createElement('div');
-        btn.textContent = text;
         btn.title = title;
         btn.style.cssText = [
-          'width: 22px !important;',
-          'height: 16px !important;',
+          'width: 100% !important;',
+          'height: 20px !important;',
           'display: flex !important;',
           'align-items: center !important;',
           'justify-content: center !important;',
           'box-sizing: border-box !important;',
-          'border-radius: 4px !important;',
-          'background: rgba(255, 255, 255, 0.08) !important;',
-          'color: #e2ebe0 !important;',
-          'font-size: 10px !important;',
-          'line-height: 1 !important;',
+          direction === 'up'
+            ? 'border-radius: 10px 10px 0 0 !important;'
+            : 'border-radius: 0 0 10px 10px !important;',
+          'background: transparent !important;',
           'cursor: pointer !important;',
           'pointer-events: auto !important;',
           'user-select: none !important;',
           '-webkit-user-select: none !important;',
           'touch-action: none !important;',
         ].join(' ');
+        const tri = doc.createElement('div');
+        tri.style.cssText = direction === 'up'
+          ? [
+            'width: 0 !important;',
+            'height: 0 !important;',
+            'border-left: 17px solid transparent !important;',
+            'border-right: 17px solid transparent !important;',
+            'border-bottom: 10px solid #e2ebe0 !important;',
+            'pointer-events: none !important;',
+          ].join(' ')
+          : [
+            'width: 0 !important;',
+            'height: 0 !important;',
+            'border-left: 17px solid transparent !important;',
+            'border-right: 17px solid transparent !important;',
+            'border-top: 10px solid #e2ebe0 !important;',
+            'pointer-events: none !important;',
+          ].join(' ');
+        btn.appendChild(tri);
         return btn;
       };
-      const upBtn = makeStepButton('▲', '力度 +1');
-      const downBtn = makeStepButton('▼', '力度 -1');
+      const upBtn = makeStepButton('up', '力度 +1');
+      const downBtn = makeStepButton('down', '力度 -1');
 
       const label = doc.createElement('div');
       label.textContent = '力度';
@@ -2191,7 +2208,7 @@
       ].join(' ');
 
       track.append(fill, thumb);
-      root.append(pct, upBtn, track, downBtn, label);
+      root.append(upBtn, pct, track, label, downBtn);
       doc.body.appendChild(root);
       _powerLockUi = { root, pct, upBtn, track, downBtn, fill, thumb, label };
       this.bindUiEvents(doc);
@@ -2270,13 +2287,14 @@
 
       const bindStepButton = (btn, delta) => {
         if (!btn) return;
-        const stopOnly = (e) => e.stopPropagation();
-        btn.addEventListener('pointerdown', stopOnly);
-        btn.addEventListener('pointerup', stopOnly);
+        // 直接在 pointerdown 执行加减，避免小按钮上 click 合成失败导致点击无反应。
+        btn.addEventListener('pointerdown', (e) => {
+          e.stopPropagation();
+          this.setValue(this.value + delta);
+        });
         btn.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          this.setValue(this.value + delta);
         });
       };
       bindStepButton(upBtn, 1);
