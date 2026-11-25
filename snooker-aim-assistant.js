@@ -2086,19 +2086,33 @@
         'width: 34px !important;',
         'padding: 0 !important;',
         'box-sizing: border-box !important;',
-        'border-radius: 10px !important;',
-        'background: rgba(14, 28, 20, 0.94) !important;',
-        'box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.10) !important;',
-        'backdrop-filter: blur(8px) !important;',
         'display: none;',
         'flex-direction: column !important;',
         'align-items: center !important;',
-        'gap: 6px !important;',
+        'gap: 4px !important;',
+        'background: transparent !important;',
         'pointer-events: auto !important;',
         'user-select: none !important;',
         '-webkit-user-select: none !important;',
         'touch-action: none !important;',
         'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif !important;',
+      ].join(' ');
+
+      // 黑色背景框只包裹百分比、轨道和“力度”文字；上下三角按钮在框外。
+      const box = doc.createElement('div');
+      box.style.cssText = [
+        'width: 34px !important;',
+        'padding: 7px 0 !important;',
+        'box-sizing: border-box !important;',
+        'border-radius: 10px !important;',
+        'background: rgba(14, 28, 20, 0.94) !important;',
+        'box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.10) !important;',
+        'backdrop-filter: blur(8px) !important;',
+        'display: flex !important;',
+        'flex-direction: column !important;',
+        'align-items: center !important;',
+        'gap: 6px !important;',
+        'pointer-events: auto !important;',
       ].join(' ');
 
       const pct = doc.createElement('div');
@@ -2158,7 +2172,7 @@
         btn.title = title;
         btn.style.cssText = [
           'width: 100% !important;',
-          'height: 20px !important;',
+          'height: 30px !important;',
           'display: flex !important;',
           'align-items: center !important;',
           'justify-content: center !important;',
@@ -2180,7 +2194,7 @@
             'height: 0 !important;',
             'border-left: 17px solid transparent !important;',
             'border-right: 17px solid transparent !important;',
-            'border-bottom: 10px solid #e2ebe0 !important;',
+            'border-bottom: 29.44px solid #e2ebe0 !important;',
             'pointer-events: none !important;',
           ].join(' ')
           : [
@@ -2188,7 +2202,7 @@
             'height: 0 !important;',
             'border-left: 17px solid transparent !important;',
             'border-right: 17px solid transparent !important;',
-            'border-top: 10px solid #e2ebe0 !important;',
+            'border-top: 29.44px solid #e2ebe0 !important;',
             'pointer-events: none !important;',
           ].join(' ');
         btn.appendChild(tri);
@@ -2208,9 +2222,10 @@
       ].join(' ');
 
       track.append(fill, thumb);
-      root.append(upBtn, pct, track, label, downBtn);
+      box.append(pct, track, label);
+      root.append(upBtn, box, downBtn);
       doc.body.appendChild(root);
-      _powerLockUi = { root, pct, upBtn, track, downBtn, fill, thumb, label };
+      _powerLockUi = { root, box, pct, upBtn, track, downBtn, fill, thumb, label };
       this.bindUiEvents(doc);
       this.updateUiLabels();
     },
