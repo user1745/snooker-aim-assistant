@@ -173,6 +173,7 @@
     'showCueLine',
     'showCuePostTrajectory',
     'showCushionRebound',
+    'showObjectRebound',
     'showHudPill',
     'showDebug',
     'powerLockEnabled',
@@ -9880,6 +9881,7 @@
     versionBadgeEl: null,
     toggleBtn: null,
     debugLine: null,
+    allTogglesBtn: null,
     collapsed: true,
     circleHidden: false,
     _built: false,
@@ -10557,6 +10559,7 @@
             powerLock.setEnabled(cb.checked);
           }
           saveToggles();
+          this.updateToggleAllButton();
         };
         this._checkboxes[key] = cb;
 
@@ -10578,11 +10581,42 @@
       row('母球→目标球（白色瞄准线）', 'showCueLine');
       row('物理引擎母球走位预测弧线', 'showCuePostTrajectory');
       row('母球吃库反弹折线', 'showCushionRebound');
+      row('目标球吃库反弹折线', 'showObjectRebound');
 
 
       row('信息浮标', 'showHudPill');
       row('出杆力度锁定', 'powerLockEnabled');
       row('调试信息', 'showDebug');
+
+      const allBtn = document.createElement('button');
+      allBtn.type = 'button';
+      allBtn.id = 'snooker-toggle-all-btn';
+      allBtn.title = '一键切换所有勾选项';
+      allBtn.style.cssText = [
+        'width: 100% !important;',
+        'margin: 7px 0 2px 0 !important;',
+        'padding: 5px 8px !important;',
+        'border: 1px solid rgba(0, 255, 136, 0.35) !important;',
+        'border-radius: 5px !important;',
+        'background: linear-gradient(135deg, #1b382b 0%, #24523b 100%) !important;',
+        'color: #7df7b0 !important;',
+        'font-size: 11.5px !important;',
+        'font-weight: 600 !important;',
+        'font-family: inherit !important;',
+        'cursor: pointer !important;',
+        'box-sizing: border-box !important;',
+        'pointer-events: auto !important;',
+        'user-select: none !important;',
+      ].join(' ');
+      allBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      allBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.toggleAllFeatures();
+      };
+      this.allTogglesBtn = allBtn;
+      this.body.appendChild(allBtn);
+      this.updateToggleAllButton();
 
       const tipHint = document.createElement('div');
       tipHint.textContent = '💡 提示: 单指双击屏幕可隐藏/重新显示控制面板';
@@ -10618,6 +10652,31 @@
       if (this.circleHidden && this.panel) {
         this.panel.style.setProperty('display', 'none', 'important');
       }
+    },
+
+    updateToggleAllButton() {
+      const btn = this.allTogglesBtn;
+      if (!btn) return;
+      const allOff = TOGGLE_KEYS.every((key) => !CONFIG[key]);
+      btn.textContent = allOff ? '勾选所有功能' : '取消所有勾选';
+    },
+
+    toggleAllFeatures() {
+      if (performance.now() < this._suppressClickUntil) return;
+      const turnOn = TOGGLE_KEYS.every((key) => !CONFIG[key]);
+      for (const key of TOGGLE_KEYS) {
+        CONFIG[key] = turnOn;
+        const cb = this._checkboxes[key];
+        if (cb) cb.checked = turnOn;
+      }
+      if (!turnOn) {
+        hudPill.hide();
+      }
+      if (Object.prototype.hasOwnProperty.call(this._checkboxes, 'powerLockEnabled')) {
+        powerLock.setEnabled(turnOn);
+      }
+      saveToggles();
+      this.updateToggleAllButton();
     },
 
     bindDragEvents() {
