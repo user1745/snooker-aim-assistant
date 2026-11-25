@@ -34,10 +34,6 @@
     cueLineWidthPx: 1.5,
     objectLineColor: '#00ff88',
     objectLineWidthPx: 1.6,
-    // 【目标球橙色实线力度条】沿绿色瞄准线显示当前力度下目标球能走到的位置；
-    // 长度与 computeTargetTravelBudgetMm()/actualReachMm 同源，终点为该力度下的预计停点。
-    targetReachBarColor: '#ff9f43',
-    targetReachBarMinMm: 5,
     // 进袋判定颜色 (用于信息浮标指示)：稳进高置信为绿色 #00ff88，临界/薄球/低置信为橙色 #ff8c33
     pocketRingColor: '#00ff88',
     pocketEdgeColor: '#ff8c33',
@@ -122,10 +118,6 @@
     targetReboundBudgetEnabled: true,
     // 微模拟只跑到「预算 × 该余量」，不含在绘制上的部分纯粹是白算的步进。
     targetReboundBudgetSimMargin: 1.35,
-    // 目标球反弹线真实停点标记（仅当蓝线来自官方引擎 targetPath 时显示）
-    showTargetReboundStop: true,
-    targetReboundStopColor: '#86cfff',
-    targetReboundStopRadiusPx: 2.6,
     // 袋口候选的最低置信度与库口距离容差；库边先于袋口时优先按吃库路线处理。
     pocketMinConfidence: 0.1,
     pocketRailToleranceMm: 40,
@@ -6784,12 +6776,10 @@
     // 用它的总长度作为目标球行程预算，直接复用官方碰后速度、滑-滚转换与库边/球体
     // 碰撞结果，避免本地经验公式在不同力度下出现“有时多跑、有时少跑”的双向误差。
     // stale 结果是上一力度/上几帧的缓存，不用于停点判断，继续走本文件兜底模型。
-    let engineTargetReachMm = null;
     if (engineTargetMatches && !engine.stale &&
         Array.isArray(engine.targetPath) && engine.targetPath.length >= 2) {
       const engineTravelMm = polylineLength(engine.targetPath);
       if (Number.isFinite(engineTravelMm) && engineTravelMm > 0) {
-        engineTargetReachMm = engineTravelMm;
         targetTravelBudgetMm = engineTravelMm;
       }
     }
@@ -6906,7 +6896,7 @@
      *
      * 这里不动物理常数（会连累推荐力度/力度不足判定/母球到达速度），只在显示层按
      * 「当前力度真正能把目标球推多远」截断。公式与 attachShotPowerMetrics().actualReachMm
-     * 完全同源，保证蓝线长度和「橙色实线力度条」不会互相打架。
+     * 保持同一套力度-行程口径，保证蓝线长度和力度不足判定一致。
      */
     let displayReboundPath = rawDisplayReboundPath;
     let reboundBudgetMm = null;
@@ -6957,7 +6947,7 @@
         // 被力度预算截断的终点不是物理停稳点，别让外部把它当真实 restPoint。
         if (cut.trimmed) reboundRestExact = false;
       } else {
-        // 力度根本推不到第一库：整条蓝线不画（绿线保持实线，橙色力度条会停在第一库前）。
+        // 力度根本推不到第一库：整条蓝线不画（绿线保持实线）。
         displayReboundPath = [];
         reboundRestPoint = null;
         reboundRestExact = false;
@@ -7013,19 +7003,6 @@
       reboundBudgetTrimmedMm,
       reboundBudgetLimited,
       pathLengthMm: polylineLength(verts),
-      // 橙色实线力度条使用的目标球行程预算；出杆冻结快照也要带着它。
-      // 优先官方引擎 targetPath 总长度；引擎不可用/结果 stale 时回退经验模型。
-      targetReachMm: Number.isFinite(Number(engineTargetReachMm)) && Number(engineTargetReachMm) > 0
-        ? Number(engineTargetReachMm)
-        : (Number.isFinite(Number(targetTravelBudgetMm)) && Number(targetTravelBudgetMm) > 0
-          ? Number(targetTravelBudgetMm)
-          : computeTargetTravelBudgetMm(
-            effPower,
-            tip,
-            Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5),
-            V.dist(cue.pos, G),
-            clamp(V.dot(d, n), 0.08, 1)
-          )),
       source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
       cushionHug: pocket?.cushionHug || checkCushionHug(targetBall.pos, tableBoundsObj),
     };
@@ -7054,7 +7031,14 @@
       const cosCut = clamp(V.dot(geomPred.aimDir, geomPred.target.objectDir), 0.08, 1);
 
       // 官方引擎已经给出目标球真实停点时，直接采用；否则回退经验模型。
-      const engineReachMm = Number(geomPred.target && geomPred.target.targetReachMm);
+      const engine = geomPred.engineSim;
+      const engineMatches = Boolean(
+        engine && engine.hit && !engine.stale &&
+        engine.targetId != null &&
+        geomPred.target.ball && String(engine.targetId) === String(geomPred.target.ball.id) &&
+        Array.isArray(engine.targetPath) && engine.targetPath.length >= 2
+      );
+      const engineReachMm = engineMatches ? polylineLength(engine.targetPath) : null;
       actualReachMm = (Number.isFinite(engineReachMm) && engineReachMm > 0)
         ? engineReachMm
         : computeTargetTravelBudgetMm(power, tip, vertAngle, sCue, cosCut);
@@ -7064,7 +7048,7 @@
 
       if (power > 2 && targetPathLen > 0) {
         // 当实际可达距离不足以到达袋口并具备 150mm 扎实落袋余量时，判定为力度不足；
-        // 该状态只用于 HUD 文案，不再改变绿色瞄准线线型（改由橙色实线力度条显示停点）。
+        // 该状态只用于 HUD 文案，不影响绿色瞄准线线型。
         if (actualReachMm < targetPathLen + 150) {
           insufficientPower = true;
         }
@@ -7095,8 +7079,6 @@
       power,
       effSpeed,
       actualReachMm,
-      // 橙色实线力度条的显示长度：与 actualReachMm/蓝线预算完全同源。
-      targetReachMm: actualReachMm,
       insufficientPower,
       recPower,
       roomMode: detectCurrentRoomMode(state),
@@ -7680,7 +7662,6 @@
       cushionHug: t.cushionHug ? { ...t.cushionHug } : null,
       cutAngleDeg: Number.isFinite(Number(t.cutAngleDeg)) ? Number(t.cutAngleDeg) : null,
       pathLengthMm: Number.isFinite(Number(t.pathLengthMm)) ? Number(t.pathLengthMm) : null,
-      targetReachMm: Number.isFinite(Number(t.targetReachMm)) ? Number(t.targetReachMm) : null,
       noFirstRail: Boolean(t.noFirstRail),
     } : null;
     return {
@@ -7902,7 +7883,6 @@
   let _cueLineCompleted = false;
   let _targetLineCompleted = false;
   let _targetMaxTravel = 0;
-  let _targetReachBarCompleted = false;
   let _targetReboundCompleted = false;
   let _targetReboundEngaged = false;
   let _targetReboundMaxTravel = 0;
@@ -7923,7 +7903,6 @@
   function resetTargetMotionState() {
     _targetLineCompleted = false;
     _targetMaxTravel = 0;
-    _targetReachBarCompleted = false;
     _targetReboundCompleted = false;
     _targetReboundEngaged = false;
     _targetReboundMaxTravel = 0;
@@ -8739,77 +8718,6 @@
   }
 
   /**
-   * 橙色力度条专用擦除：与绿色瞄准线同观感，但使用独立完成状态，
-   * 不污染绿色线的 _targetMaxTravel / _targetLineCompleted 判定。
-   * 橙条终点只是当前力度下的预计停点，可能早于绿线终点（袋口/库边）。
-   */
-  function trimTargetReachBarFromLive(originalPath, liveTargetPos, isTargetPotted) {
-    if (!Array.isArray(originalPath) || originalPath.length < 2) return null;
-    if (_targetLineCompleted || _targetReachBarCompleted || isTargetPotted) {
-      _targetReachBarCompleted = true;
-      return null;
-    }
-    if (!liveTargetPos) return originalPath;
-
-    const startPt = originalPath[0];
-    const endPt = originalPath[originalPath.length - 1];
-    const movedDist = Math.hypot(liveTargetPos.x - startPt.x, liveTargetPos.y - startPt.y);
-    if (movedDist <= 6) return originalPath;
-
-    const distToEnd = Math.hypot(liveTargetPos.x - endPt.x, liveTargetPos.y - endPt.y);
-    if (distToEnd <= 1.5) {
-      _targetReachBarCompleted = true;
-      return null;
-    }
-
-    let bestSegmentIdx = -1;
-    let bestDistSq = Infinity;
-    let accumulatedLen = 0;
-    let projTravel = 0;
-
-    for (let i = 0; i < originalPath.length - 1; i++) {
-      const p1 = originalPath[i];
-      const p2 = originalPath[i + 1];
-      const segDx = p2.x - p1.x;
-      const segDy = p2.y - p1.y;
-      const segLen = Math.hypot(segDx, segDy);
-      if (segLen < 1e-4) continue;
-
-      let t = ((liveTargetPos.x - p1.x) * segDx + (liveTargetPos.y - p1.y) * segDy) / (segLen * segLen);
-      t = clamp(t, 0, 1);
-      const projX = p1.x + t * segDx;
-      const projY = p1.y + t * segDy;
-      const dSq = (liveTargetPos.x - projX) ** 2 + (liveTargetPos.y - projY) ** 2;
-
-      if (dSq < bestDistSq) {
-        bestDistSq = dSq;
-        bestSegmentIdx = i;
-        projTravel = accumulatedLen + t * segLen;
-      }
-      accumulatedLen += segLen;
-    }
-
-    if (bestDistSq > 60 * 60 && movedDist > 40) {
-      _targetReachBarCompleted = true;
-      return null;
-    }
-    if (accumulatedLen - projTravel <= 1.5) {
-      _targetReachBarCompleted = true;
-      return null;
-    }
-    if (bestSegmentIdx < 0) {
-      _targetReachBarCompleted = true;
-      return null;
-    }
-
-    const trimmed = [{ x: liveTargetPos.x, y: liveTargetPos.y }];
-    for (let i = bestSegmentIdx + 1; i < originalPath.length; i++) {
-      trimmed.push(originalPath[i]);
-    }
-    return trimmed.length >= 2 ? trimmed : null;
-  }
-
-  /**
    * v1.9.8：按固定世界距离把折线采样成短段。
    * 目标球反弹线经常是一条第一库→第二库的整台长段，直接交给 projectPolyline
    * 时会被 3 倍画布跳变保护整段丢弃；采样后只可能丢失局部，不会整线消失。
@@ -9464,7 +9372,6 @@
         _cueLineCompleted = false;
         _targetLineCompleted = false;
         _targetMaxTravel = 0;
-        _targetReachBarCompleted = false;
         _targetReboundCompleted = false;
         _targetReboundEngaged = false;
         _targetReboundMaxTravel = 0;
@@ -9618,7 +9525,6 @@
       }
 
       // 2) 目标球延长线：静态预览全长绘制；出杆撞击后随目标球向前移动逐步擦除，进袋或弹库走完瞬间彻底消失。
-      // 力度不足不再改变线型，统一由下方橙色实线力度条显示当前力度的真实停点。
       if (lineOptions.liveGreen && t && CONFIG.showObjectLine && Array.isArray(t.objectPath) && t.objectPath.length >= 2) {
         let pathToDraw = t.objectPath;
         if (inMotion) {
@@ -9646,60 +9552,6 @@
             }
             ctx.stroke();
             ctx.restore();
-          }
-        }
-      }
-
-      // 2.1) 【目标球橙色实线力度条】沿绿色瞄准线显示当前力度下目标球能走到的位置。
-      //      长度 = 当前力度下的目标球行程预算（与蓝线预算同源），终点 = 该力度下的预计停点。
-      //      只覆盖第一库/袋口之前的绿线段，不进入吃库反弹段；始终实线绘制，替代原橙色虚线。
-      //      出杆运动阶段与绿色瞄准线同观感：随目标球实时位置从起点单向擦除，走到预算终点即消失。
-      if (!pred.unreachable && lineOptions.liveGreen && t && CONFIG.showObjectLine &&
-          currentEffPower > 2 && Array.isArray(t.objectPath) && t.objectPath.length >= 2) {
-        const reachMm = Number(
-          pred.targetReachMm != null ? pred.targetReachMm :
-          (t.targetReachMm != null ? t.targetReachMm : pred.actualReachMm)
-        );
-        const minBarMm = Math.max(1, Number(CONFIG.targetReachBarMinMm) || 5);
-        if (Number.isFinite(reachMm) && reachMm > minBarMm) {
-          const preRailEnd = t.pocket
-            ? (t.pocket.enterPoint || t.pocket.opening || t.objectEnd)
-            : (t.objectEnd || null);
-          const preRailLen = (t.ball && t.ball.pos && preRailEnd)
-            ? V.dist(t.ball.pos, preRailEnd)
-            : polylineLength(t.objectPath);
-          const barLenMm = Math.min(reachMm, preRailLen);
-          if (barLenMm > minBarMm) {
-            let barPts = trimPolyline(t.objectPath, barLenMm);
-            if (inMotion) {
-              barPts = trimTargetReachBarFromLive(barPts, liveTargetPos, liveTargetPotted);
-            }
-            if (barPts && barPts.length >= 2) {
-              const sampledBar = samplePolylineByDistance(
-                barPts,
-                CONFIG.targetReboundSampleStepMm || 50
-              );
-              const barProj = this.projectPolyline(sampledBar, cueWorld);
-              if (barProj.segments.length > 0) {
-                hasProjected = true;
-                ctx.save();
-                this.clipToTable(ctx, pred.tableBounds);
-                ctx.strokeStyle = CONFIG.targetReachBarColor || '#ff9f43';
-                // 与绿色瞄准线保持完全一致的粗细，避免覆盖时出现视觉差异。
-                ctx.lineWidth = CONFIG.objectLineWidthPx || 1.6;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-                ctx.setLineDash([]);
-                ctx.beginPath();
-                for (const seg of barProj.segments) {
-                  ctx.moveTo(seg[0].x, seg[0].y);
-                  ctx.lineTo(seg[1].x, seg[1].y);
-                  drawnSegments.push(seg);
-                }
-                ctx.stroke();
-                ctx.restore();
-              }
-            }
           }
         }
       }
@@ -9802,25 +9654,6 @@
               ctx.stroke();
               ctx.restore();
             }
-          }
-        }
-
-        // 官方引擎轨迹的真实停点标记：只在该蓝线确实来自 engine targetPath 时显示。
-        // 力度变化时 engine targetPath 会同步更新，标记随预测停点实时移动。
-        if (!inMotion && CONFIG.showTargetReboundStop &&
-            t.reboundRestExact && t.reboundStopReason === 'engineSim' && t.reboundRestPoint) {
-          const stopPx = this.localCloth(t.reboundRestPoint, cueWorld);
-          if (stopPx && this.isSafeProjectedPoint(stopPx)) {
-            ctx.save();
-            this.clipToTable(ctx, pred.tableBounds);
-            ctx.beginPath();
-            ctx.arc(stopPx.x, stopPx.y, CONFIG.targetReboundStopRadiusPx || 2.6, 0, Math.PI * 2);
-            ctx.fillStyle = CONFIG.targetReboundStopColor || CONFIG.cueCushionReboundColor || '#86cfff';
-            ctx.fill();
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
-            ctx.stroke();
-            ctx.restore();
           }
         }
       }
