@@ -1949,7 +1949,7 @@
     },
 
     applyToActiveCores() {
-      if (!this.enabled) return;
+      if (!Boolean(CONFIG.powerLockEnabled)) return;
       // 出杆运动期间不要改 core 力度，避免影响本杆结算；下一杆会在 shoot 前重新锁定。
       try {
         if (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked) return;
@@ -1976,7 +1976,6 @@
         showToast('已关闭出杆力度锁定，恢复游戏原始力度', 1500);
       } else {
         this.ensureUI();
-        this.applyToActiveCores();
         this.updateVisibility(true);
         showToast(`出杆力度已锁定为 ${this.value}%`, 1600);
       }
@@ -1994,7 +1993,7 @@
       CONFIG.powerLockValue = next;
       if (options.persist !== false) this.saveValue();
       this.updateUiLabels();
-      if (options.apply !== false) this.applyToActiveCores();
+      // 瞄准/滑动阶段只更新锁定值，不写 core；实际出杆前由 shoot 拦截写入。
     },
 
     syncFromConfig() {
@@ -2002,7 +2001,6 @@
       this.loadValue();
       this.ensureUI();
       this.updateVisibility(true);
-      if (this.enabled) this.applyToActiveCores();
     },
 
     installStorageSync() {
@@ -2219,7 +2217,7 @@
         if (!Number.isFinite(clientY)) return;
         // 拖动期间只更新本地数值与 UI，不访问游戏 core / 不走跨窗口查找，
         // 避免快速滑动时每帧 setPower 造成明显的跟手滞后。
-        this.setValue(valueFromY(clientY), { persist: false, apply: false });
+        this.setValue(valueFromY(clientY), { persist: false });
       };
       const scheduleMove = (clientY) => {
         pendingY = clientY;
@@ -2263,8 +2261,6 @@
           }
         } catch (_) {}
         this.saveValue();
-        // 松手时同步一次游戏 core 力度；实际出杆仍由 shoot 拦截再次强制。
-        this.applyToActiveCores();
       };
       track.addEventListener('pointerdown', onDown);
       track.addEventListener('pointermove', onMove);
@@ -2318,21 +2314,8 @@
     const origShoot = core.shoot;
     if (typeof origShoot !== 'function') return;
     try {
-      // 1) 拖动球杆时游戏会反复 setPower(玩家力度)；锁定期间把非零值替换为锁定值，
-      //    保证即使游戏内部提前缓存了力度，最终核心状态仍是锁定值。
-      const origSetPower = core.setPower;
-      if (typeof origSetPower === 'function') {
-        core.setPower = function (p) {
-          try {
-            const inShot = (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked);
-            if (!inShot && powerLock.shouldLockShot() && Number(p) > 0) {
-              return origSetPower.call(this, powerLock.value);
-            }
-          } catch (_) {}
-          return origSetPower.call(this, p);
-        };
-      }
-      // 2) 出杆入口再强制一次，覆盖游戏在 shoot 前最后一次写入力度的时机。
+      // 不再拦截 setPower：瞄准阶段让游戏原本的力度条跟随球杆自由变化。
+      // 只在真正出手前强制写入锁定力度。
       core.shoot = function (...args) {
         try {
           if (powerLock.shouldLockShot()) {
@@ -2348,23 +2331,70 @@
   }
 
   const _powerLockShotHookDocs = new WeakSet();
-  function installPowerLockShotFallback(doc) {
-    if (!doc || _powerLockShotHookDocs.has(doc)) return;
-    _powerLockShotHookDocs.add(doc);
-    const apply = (e) => {
+  const _powerLockReleaseState = {
+    active: false,
+    pointerId: null,
+    x: 0,
+    y: 0,
+    moved: false,
+  };
+  function installPowerLockShotFallback(target) {
+    if (!target || _powerLockShotHookDocs.has(target)) return;
+    _powerLockShotHookDocs.add(target);
+    const isOurUi = (el) => Boolean(el && el.closest && (
+      el.closest('#snooker-aim-power-lock') ||
+      el.closest('#snooker-aim-panel')
+    ));
+    const onDown = (e) => {
+      if (!powerLock.shouldLockShot()) return;
+      if (isOurUi(e.target)) return;
+      _powerLockReleaseState.active = true;
+      _powerLockReleaseState.pointerId = e.pointerId != null ? e.pointerId : null;
+      _powerLockReleaseState.x = Number(e.clientX) || 0;
+      _powerLockReleaseState.y = Number(e.clientY) || 0;
+      _powerLockReleaseState.moved = false;
+    };
+    const onMove = (e) => {
+      if (!_powerLockReleaseState.active) return;
+      if (_powerLockReleaseState.pointerId != null && e.pointerId != null &&
+          _powerLockReleaseState.pointerId !== e.pointerId) return;
+      const dx = (Number(e.clientX) || 0) - _powerLockReleaseState.x;
+      const dy = (Number(e.clientY) || 0) - _powerLockReleaseState.y;
+      if (Math.hypot(dx, dy) > 8) _powerLockReleaseState.moved = true;
+    };
+    const onUp = (e) => {
+      if (!_powerLockReleaseState.active) return;
+      if (_powerLockReleaseState.pointerId != null && e.pointerId != null &&
+          _powerLockReleaseState.pointerId !== e.pointerId) return;
+      const moved = _powerLockReleaseState.moved;
+      _powerLockReleaseState.active = false;
+      _powerLockReleaseState.pointerId = null;
+      _powerLockReleaseState.moved = false;
+      if (!moved) return;
       if (!powerLock.shouldLockShot()) return;
       try {
         if (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked) return;
       } catch (_) {}
-      const target = e && e.target;
-      if (target && target.closest && target.closest('#snooker-aim-power-lock')) return;
-      // 兜底：如果游戏的出杆入口不是 core.shoot（或已被提前绑定），
-      // 在指针释放阶段再同步一次力度。
+      if (isOurUi(e.target)) return;
+      // 只有玩家确实拉动过球杆/蓄力时才在释放瞬间写入锁定力度；
+      // 普通点击、视角拖动不会改动游戏力度条。
+      let rawPower = null;
+      try {
+        rawPower = extractRawStatePower(readState());
+      } catch (_) {}
+      if (!(Number.isFinite(Number(rawPower)) && Number(rawPower) > 0.5)) return;
+      // 在游戏自己的 release/shoot 处理之前写入；shoot 包裹仍会再兜底一次。
       powerLock.applyToActiveCores();
     };
-    doc.addEventListener('pointerup', apply, true);
-    doc.addEventListener('mouseup', apply, true);
-    doc.addEventListener('touchend', apply, true);
+    const onCancel = () => {
+      _powerLockReleaseState.active = false;
+      _powerLockReleaseState.pointerId = null;
+      _powerLockReleaseState.moved = false;
+    };
+    target.addEventListener('pointerdown', onDown, true);
+    target.addEventListener('pointermove', onMove, true);
+    target.addEventListener('pointerup', onUp, true);
+    target.addEventListener('pointercancel', onCancel, true);
   }
 
   function resolveEffectivePower(state) {
@@ -11437,6 +11467,11 @@
 
   function boot() {
     installCoreHook();
+    // 尽早安装释放阶段钩子，争取在游戏自己的 pointerup/shoot 处理之前写入锁定力度。
+    try {
+      installPowerLockShotFallback(window);
+      installPowerLockShotFallback(document);
+    } catch (_) {}
     if (window === window.top) {
       try { installDailyEntryHook(); } catch (_) {}
       try { if (typeof DailyRunner !== 'undefined' && DailyRunner) DailyRunner.init(); } catch (_) {}
