@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.18
+// @version      1.9.16
 // @description  目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs白色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.18';
+  const SCRIPT_VERSION = '1.9.16';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -701,7 +701,6 @@
     payloadFactory: null,
     simMs: 0,
     frames: 0,
-    _coreParamsApplied: false,
     _nativeCacheKey: '',
     _nativeCacheResult: null,
 
@@ -780,32 +779,6 @@
       const settings = ph.settings || {};
       const ov = ph.overrides || {};
       const hasConfig = Object.keys(ov).length > 0 || Object.keys(settings).length > 0;
-
-      // 游戏内核当前真实物理参数优先，且必须先于旧参数早退判断执行。
-      // GAME_CLIENT_CONFIG 可能是上一张球桌/旧模式留下的配置，拿它复算会出现
-      // “引擎轨迹比真实母球短一截”的系统误差；core.getPhysicsParams() 与页面
-      // 真实出杆使用的 physicsOverrides 同源。
-      try {
-        const coreParams = core && typeof core.getPhysicsParams === 'function'
-          ? core.getPhysicsParams() : null;
-        const corePower = coreParams && coreParams.v3
-          ? Number(coreParams.v3.maxCuePower != null ? coreParams.v3.maxCuePower : coreParams.maxCuePower)
-          : NaN;
-        if (coreParams && coreParams.v3 &&
-            Number.isFinite(corePower) && corePower > 0) {
-          this.params = coreParams;
-          this.paramsFromConfig = true;
-          this._coreParamsApplied = true;
-          const pwr = corePower;
-          const roll = Number(coreParams.v3.clothRollingDecelMmS2);
-          const slide = Number(coreParams.v3.tableSlidingAccel);
-          if (Number.isFinite(pwr) && pwr > 0) CONFIG.maxCuePowerMmS = pwr;
-          if (Number.isFinite(roll) && roll >= 80) CONFIG.clothRollingDecelMmS2 = roll;
-          if (Number.isFinite(slide) && slide > 0) CONFIG.tableSlidingAccelMmS2 = slide;
-          return this.params;
-        }
-      } catch (_) {}
-
       if (!force && this.params && (this.paramsFromConfig || !hasConfig)) return this.params;
 
       const isV3 = settings.physicsEngine !== 'v2' && settings.physicsEngine !== 'legacy';
@@ -849,7 +822,6 @@
       }
       this.params = params;
       this.paramsFromConfig = hasConfig;
-      this._coreParamsApplied = false;
       return params;
     },
 
@@ -871,10 +843,14 @@
     },
 
     getParams() {
+      const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
       const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
-      const coreReady = Boolean(core && typeof core.getPhysicsParams === 'function');
-      if (!this.params || (coreReady && !this._coreParamsApplied)) {
-        this.resolvePhysicsParams(this.loadModule || null, Boolean(coreReady));
+      const hasDynamicConfig = Boolean(
+        (cfg && cfg.physics) ||
+        (core && (core.config || (typeof core.getConfig === 'function' && core.getConfig())))
+      );
+      if (!this.params || (!this.paramsFromConfig && hasDynamicConfig)) {
+        this.resolvePhysicsParams(this.loadModule || null, false);
       }
       return this.params || {};
     },
@@ -953,9 +929,6 @@
         tableBoundaryId: boundary,
         cueBallId: state.cueBallId || 'cue',
         balls,
-        // 官方瞄准预测载荷默认给 18s；旧版 simulateShot 默认 16s，极端高力度
-        // 多库球可能先撞到时间上限，母球路径还没走到真实停点。
-        maxSeconds: 18,
         shot: {
           direction: { x: shot.direction.x, y: shot.direction.y },
           power: shot.power,
@@ -1002,9 +975,6 @@
           targetId: null,
           targetPath: [],
           cuePath: [],
-          cueRestPath: [],
-          cueRestPos: null,
-          cueRestExact: false,
           potted: false,
           cuePotted: false,
           simMs: this.simMs,
@@ -1042,23 +1012,9 @@
 
       const targetPath = sample(targetId, 6, 0);
       let cuePath = sample(cueId, 5, hitT, nextT);
-      // 白线专用：从目标球首次碰撞开始一直采样到整杆结束，不再被 nextT 截断。
-      // cuePath 仍保留原来的「下一次撞球前」语义，供调试/其他逻辑使用；
-      // cueRestPath 是给落位白线用的完整路径，末尾由最后一帧补点。
-      const cueRestPath = sample(cueId, 5, hitT);
       const lastFrame = frames[frames.length - 1];
       const tb = lastFrame ? at(lastFrame, targetId) : null;
       const cb = lastFrame ? at(lastFrame, cueId) : null;
-
-      // sample() 以 5mm 最小步长采样，最后一小段蠕动可能不足 5mm 而被丢掉；
-      // 这里补上母球最终帧，保证白线终点就是引擎真实停点。
-      if (cb && cb.pos && !cb.potted &&
-          Number.isFinite(cb.pos.x) && Number.isFinite(cb.pos.y)) {
-        const lastCueRest = cueRestPath[cueRestPath.length - 1];
-        if (!lastCueRest || Math.hypot(cb.pos.x - lastCueRest.x, cb.pos.y - lastCueRest.y) > 0.01) {
-          cueRestPath.push({ x: cb.pos.x, y: cb.pos.y });
-        }
-      }
 
       // sample() 以 6mm 最小步长采样，最后一小段蠕动可能不足 6mm 而被丢掉；
       // 这里补上目标球最终停点，保证蓝线终点/停点标记就是引擎真实停点。
@@ -1125,15 +1081,6 @@
         targetFirstRailT,
         targetPathAfterRail,
         cuePath,
-        // 落位白线专用完整路径：从首次碰撞到整杆结束，含最后一帧补点；
-        // 不经过旧版长度裁剪，终点 = 官方引擎母球最终停点。
-        cueRestPath,
-        cueRestPos: cueRestPath.length
-          ? { x: cueRestPath[cueRestPath.length - 1].x, y: cueRestPath[cueRestPath.length - 1].y }
-          : (cb && cb.pos && Number.isFinite(cb.pos.x) && Number.isFinite(cb.pos.y)
-            ? { x: cb.pos.x, y: cb.pos.y }
-            : null),
-        cueRestExact: Boolean(cueRestPath.length >= 1),
         potted: Boolean(tb && tb.potted),
         cuePotted: Boolean(cb && cb.potted),
         cueNextBallId: nextBallId,
@@ -6482,36 +6429,18 @@
     if (CONFIG.showCuePostTrajectory && effPower > 0) {
       let cuePostPath = null;
       let cuePostMethod = 'algo';
-      let cuePostRestExact = false;
-      let cuePostStale = Boolean(engine && engine.stale);
-      if (engine && !engine.stale &&
-          Array.isArray(engine.cueRestPath) && engine.cueRestPath.length >= 1) {
-        // 官方引擎从首次碰撞到整杆结束的完整路径；终点由最后一帧补点，不再用
-        // 旧版 cuePath 的 nextT 截断和 CALIB_RATIOS 长度裁剪。
-        cuePostPath = [{ x: G.x, y: G.y }, ...engine.cueRestPath];
-        cuePostMethod = 'engineSim';
-        cuePostRestExact = Boolean(engine.cueRestExact !== false);
-      } else if (engine && !engine.stale &&
-          Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
-        // 兼容旧版引擎结果：没有 cueRestPath 时仍保证有白线，但明确标记为近似。
+      if (engine && Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
         cuePostPath = [{ x: G.x, y: G.y }, ...engine.cuePath];
-        cuePostMethod = 'engineSim-legacy';
-        cuePostRestExact = false;
+        cuePostMethod = 'engineSim';
       } else {
-        // stale 结果不能继续冒充当前力度下的终点；回退到实时解析路径并标记近似。
+        // 0ms 瞬时解析物理走位线：拖动力度条时 60FPS 实时丝滑跟手变动，彻底告别 1~2 秒僵滞！
         cuePostPath = simulateInstantCuePostTrajectory(G, targetBall.pos, d, effPower, tip, boundX, boundY, pockets);
-        cuePostMethod = cuePostStale ? 'algo-stale' : 'algo';
-        cuePostRestExact = false;
+        cuePostMethod = 'algo';
       }
       if (cuePostPath && cuePostPath.length >= 2) {
         result.cuePostTrajectory = cuePostPath;
-        result.cueRestPos = (cuePostMethod === 'engineSim' && engine && engine.cueRestPos &&
-          Number.isFinite(Number(engine.cueRestPos.x)) && Number.isFinite(Number(engine.cueRestPos.y)))
-          ? { x: Number(engine.cueRestPos.x), y: Number(engine.cueRestPos.y) }
-          : cuePostPath[cuePostPath.length - 1];
+        result.cueRestPos = cuePostPath[cuePostPath.length - 1];
         result.cuePostMethod = cuePostMethod;
-        result.cuePostRestExact = cuePostRestExact;
-        result.cuePostStale = cuePostStale;
       }
     }
 
