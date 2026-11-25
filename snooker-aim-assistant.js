@@ -2083,8 +2083,8 @@
         'top: 50% !important;',
         'transform: translateY(-50%) !important;',
         'z-index: 2147483647 !important;',
-        'width: 52px !important;',
-        'padding: 9px 7px 7px !important;',
+        'width: 34px !important;',
+        'padding: 9px 3px 7px !important;',
         'box-sizing: border-box !important;',
         'border-radius: 10px !important;',
         'background: rgba(14, 28, 20, 0.94) !important;',
@@ -2098,14 +2098,15 @@
         'user-select: none !important;',
         '-webkit-user-select: none !important;',
         'touch-action: none !important;',
-        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif !important;',
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif !important;',
       ].join(' ');
 
       const pct = doc.createElement('div');
       pct.style.cssText = [
-        'font-size: 14px !important;',
-        'font-weight: 700 !important;',
+        'font-size: 11px !important;',
+        'font-weight: 600 !important;',
         'line-height: 1 !important;',
+        'letter-spacing: 0.3px !important;',
         'color: #00ff88 !important;',
         'text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) !important;',
         'font-variant-numeric: tabular-nums !important;',
@@ -2114,9 +2115,9 @@
       const track = doc.createElement('div');
       track.style.cssText = [
         'position: relative !important;',
-        'width: 12px !important;',
+        'width: 8px !important;',
         'height: 180px !important;',
-        'border-radius: 6px !important;',
+        'border-radius: 4px !important;',
         'background: rgba(255, 255, 255, 0.14) !important;',
         'box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.4) !important;',
         'cursor: pointer !important;',
@@ -2132,7 +2133,7 @@
         'right: 0 !important;',
         'bottom: 0 !important;',
         'height: 50% !important;',
-        'border-radius: 6px !important;',
+        'border-radius: 4px !important;',
         'background: #00ff88 !important;',
         'transition: height 0.06s linear, background 0.15s linear !important;',
       ].join(' ');
@@ -2155,9 +2156,10 @@
       const label = doc.createElement('div');
       label.textContent = '力度';
       label.style.cssText = [
-        'font-size: 12px !important;',
+        'font-size: 11px !important;',
+        'font-weight: 600 !important;',
         'line-height: 1 !important;',
-        'letter-spacing: 1px !important;',
+        'letter-spacing: 0.3px !important;',
         'color: #e2ebe0 !important;',
       ].join(' ');
 
@@ -10480,7 +10482,7 @@
 
 
       row('信息浮标', 'showHudPill');
-      row('开启出杆力度锁定', 'powerLockEnabled');
+      row('出杆力度锁定', 'powerLockEnabled');
       row('调试信息', 'showDebug');
 
       const tipHint = document.createElement('div');
