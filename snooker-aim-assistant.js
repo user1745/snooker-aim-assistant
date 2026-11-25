@@ -65,6 +65,10 @@
     showCuePostTrajectory: true,
     showHudPill: true,
     showDebug: false,
+    // 出杆力度锁定：勾选后左侧出现力度滑动条，实际出杆强制使用锁定值
+    powerLockEnabled: false,
+    powerLockValue: 50,
+    powerLockValueKey: 'snooker-aim-assistant-power-lock-value-v1',
     // v1.9.10：母球吃库反弹线与母球落位预测线采用同一生命周期：
     // 出杆运动期间整条保留，全台所有球（含母球）停稳后由静态层清除；
     // 冻结快照只用于目标球吃库反弹线，避免该线跟随目标球移动。
@@ -179,6 +183,7 @@
     'showCushionRebound',
     'showHudPill',
     'showDebug',
+    'powerLockEnabled',
   ];
   let _configVersion = 0;
   let _storageListenerInstalled = false;
@@ -1840,6 +1845,7 @@
     _turnHasInteracted = false;
     _lastShotPowerForTurn = null;
     resetShotPowerFallbacks();
+    powerLock.endAutoShotBypass();
   }
 
   // 清空只属于“上一杆”的力度兜底数据，避免下一杆快照在 state 力度缺失时
@@ -1867,8 +1873,431 @@
     return extractRawStatePower(state);
   }
 
+  /* ================================================================== */
+  /* 出杆力度锁定                                                        */
+  /* ================================================================== */
+
+  const POWER_LOCK_DEFAULT_VALUE = 50;
+  const POWER_LOCK_MIN_VALUE = 2;
+  const POWER_LOCK_MAX_VALUE = 100;
+  let _powerLockUi = null;
+  const _powerLockPatchedCores = new WeakSet();
+
+  const powerLock = {
+    enabled: Boolean(CONFIG.powerLockEnabled),
+    value: POWER_LOCK_DEFAULT_VALUE,
+    _autoBypassUntil: 0,
+    _dragging: false,
+    isTableVisible: false,
+
+    loadValue() {
+      let value = Number(CONFIG.powerLockValue);
+      if (!Number.isFinite(value)) value = POWER_LOCK_DEFAULT_VALUE;
+      try {
+        const raw = localStorage.getItem(CONFIG.powerLockValueKey);
+        if (raw != null) {
+          const saved = Number(raw);
+          if (Number.isFinite(saved)) value = saved;
+        }
+      } catch (_) {}
+      this.value = clamp(Math.round(value), POWER_LOCK_MIN_VALUE, POWER_LOCK_MAX_VALUE);
+      CONFIG.powerLockValue = this.value;
+      this.enabled = Boolean(CONFIG.powerLockEnabled);
+      return this.value;
+    },
+
+    saveValue() {
+      CONFIG.powerLockValue = this.value;
+      try {
+        localStorage.setItem(CONFIG.powerLockValueKey, String(this.value));
+      } catch (_) {}
+    },
+
+    isAutoBypass() {
+      if (this._autoBypassUntil > performance.now()) return true;
+      try {
+        if (DailyChallengeEngine && DailyChallengeEngine.running) return true;
+      } catch (_) {}
+      return false;
+    },
+
+    shouldLockAim() {
+      return Boolean(CONFIG.powerLockEnabled) && !this.isAutoBypass();
+    },
+
+    shouldLockShot() {
+      return this.shouldLockAim();
+    },
+
+    beginAutoShotBypass(ms = 4000) {
+      this._autoBypassUntil = performance.now() + Math.max(500, Number(ms) || 4000);
+    },
+
+    endAutoShotBypass() {
+      this._autoBypassUntil = 0;
+    },
+
+    collectActiveCores() {
+      const cores = [];
+      const push = (core) => {
+        if (core && typeof core === 'object' && !cores.includes(core)) cores.push(core);
+      };
+      push(capturedCore);
+      try {
+        const tg = getGameGlobal('threeGame');
+        push(tg && tg.core);
+        const sp = getGameGlobal('SnookerProduct');
+        push(sp && sp.practice);
+        push(sp && sp.core);
+        const spl = getGameGlobal('SnookerProductLite');
+        push(spl && spl.practice);
+        push(spl && spl.core);
+      } catch (_) {}
+      return cores;
+    },
+
+    applyToActiveCores() {
+      if (!this.enabled) return;
+      // 出杆运动期间不要改 core 力度，避免影响本杆结算；下一杆会在 shoot 前重新锁定。
+      try {
+        if (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked) return;
+      } catch (_) {}
+      for (const core of this.collectActiveCores()) {
+        try {
+          patchPowerLockCore(core);
+          if (typeof core.setPower === 'function') core.setPower(this.value);
+        } catch (_) {}
+      }
+    },
+
+    setEnabled(enabled) {
+      const next = Boolean(enabled);
+      this.enabled = next;
+      CONFIG.powerLockEnabled = next;
+      if (!next) {
+        this._autoBypassUntil = 0;
+        this.updateVisibility(false);
+        // 保留上一杆的真实力度基准，避免关闭锁定时把游戏回填的残留力度
+        // 误判成新一杆蓄力；只重置交互标志。
+        _turnHasInteracted = false;
+        _turnPowerActive = false;
+        showToast('已关闭出杆力度锁定，恢复游戏原始力度', 1500);
+      } else {
+        this.ensureUI();
+        this.applyToActiveCores();
+        this.updateVisibility(true);
+        showToast(`出杆力度已锁定为 ${this.value}%`, 1600);
+      }
+      saveToggles();
+    },
+
+    setValue(value, options = {}) {
+      const next = clamp(
+        Math.round(Number(value)),
+        POWER_LOCK_MIN_VALUE,
+        POWER_LOCK_MAX_VALUE
+      );
+      if (!Number.isFinite(next)) return;
+      this.value = next;
+      CONFIG.powerLockValue = next;
+      if (options.persist !== false) this.saveValue();
+      this.updateUiLabels();
+      if (options.apply !== false) this.applyToActiveCores();
+    },
+
+    syncFromConfig() {
+      this.installStorageSync();
+      this.loadValue();
+      this.ensureUI();
+      this.updateVisibility(true);
+      if (this.enabled) this.applyToActiveCores();
+    },
+
+    installStorageSync() {
+      if (this._storageInstalled) return;
+      this._storageInstalled = true;
+      try {
+        window.addEventListener('storage', (e) => {
+          if (!e) return;
+          if (e.key === CONFIG.powerLockValueKey) {
+            if (e.newValue == null) return;
+            const v = clamp(
+              Math.round(Number(e.newValue)),
+              POWER_LOCK_MIN_VALUE,
+              POWER_LOCK_MAX_VALUE
+            );
+            if (Number.isFinite(v)) {
+              this.value = v;
+              CONFIG.powerLockValue = v;
+              this.updateUiLabels();
+            }
+            return;
+          }
+          if (e.key === CONFIG.togglesKey) {
+            if (e.newValue == null) return;
+            try {
+              const saved = JSON.parse(e.newValue || '{}');
+              if (typeof saved.powerLockEnabled === 'boolean') {
+                this.enabled = saved.powerLockEnabled;
+                CONFIG.powerLockEnabled = saved.powerLockEnabled;
+                this.updateVisibility(true);
+              }
+            } catch (_) {}
+          }
+        });
+      } catch (_) {}
+    },
+
+    updateVisibility(visible) {
+      // 跨窗口/跨标签页时 CONFIG 可能已被其它实例更新，这里每帧同步开关状态。
+      this.enabled = Boolean(CONFIG.powerLockEnabled);
+      this.isTableVisible = Boolean(visible);
+      if (!this.enabled) {
+        if (_powerLockUi && _powerLockUi.root) _powerLockUi.root.style.display = 'none';
+        return;
+      }
+      this.ensureUI();
+      if (!_powerLockUi || !_powerLockUi.root) return;
+      _powerLockUi.root.style.display = this.isTableVisible ? 'flex' : 'none';
+    },
+
+    getTargetDoc() {
+      // 只跟随控制面板所在文档，避免子 iframe 各自创建一份滑动条。
+      try {
+        if (ui && ui.panel && ui.panel.ownerDocument) return ui.panel.ownerDocument;
+      } catch (_) {}
+      return null;
+    },
+
+    ensureUI() {
+      const doc = this.getTargetDoc();
+      if (!doc || !doc.body) return;
+      if (_powerLockUi && _powerLockUi.root &&
+          _powerLockUi.root.isConnected &&
+          _powerLockUi.root.ownerDocument === doc) {
+        this.updateUiLabels();
+        return;
+      }
+      try {
+        doc.querySelectorAll('#snooker-aim-power-lock').forEach((el) => el.remove());
+      } catch (_) {}
+      _powerLockUi = null;
+
+      const root = doc.createElement('div');
+      root.id = 'snooker-aim-power-lock';
+      root.style.cssText = [
+        'position: fixed !important;',
+        'left: 14px !important;',
+        'top: 50% !important;',
+        'transform: translateY(-50%) !important;',
+        'z-index: 2147483647 !important;',
+        'width: 52px !important;',
+        'padding: 9px 7px 7px !important;',
+        'box-sizing: border-box !important;',
+        'border-radius: 10px !important;',
+        'background: rgba(14, 28, 20, 0.94) !important;',
+        'box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.10) !important;',
+        'backdrop-filter: blur(8px) !important;',
+        'display: none;',
+        'flex-direction: column !important;',
+        'align-items: center !important;',
+        'gap: 6px !important;',
+        'pointer-events: auto !important;',
+        'user-select: none !important;',
+        '-webkit-user-select: none !important;',
+        'touch-action: none !important;',
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif !important;',
+      ].join(' ');
+
+      const pct = doc.createElement('div');
+      pct.style.cssText = [
+        'font-size: 14px !important;',
+        'font-weight: 700 !important;',
+        'line-height: 1 !important;',
+        'color: #00ff88 !important;',
+        'text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) !important;',
+        'font-variant-numeric: tabular-nums !important;',
+      ].join(' ');
+
+      const track = doc.createElement('div');
+      track.style.cssText = [
+        'position: relative !important;',
+        'width: 12px !important;',
+        'height: 180px !important;',
+        'border-radius: 6px !important;',
+        'background: rgba(255, 255, 255, 0.14) !important;',
+        'box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.4) !important;',
+        'cursor: pointer !important;',
+        'touch-action: none !important;',
+        'pointer-events: auto !important;',
+        'flex-shrink: 0 !important;',
+      ].join(' ');
+
+      const fill = doc.createElement('div');
+      fill.style.cssText = [
+        'position: absolute !important;',
+        'left: 0 !important;',
+        'right: 0 !important;',
+        'bottom: 0 !important;',
+        'height: 50% !important;',
+        'border-radius: 6px !important;',
+        'background: #00ff88 !important;',
+        'transition: height 0.06s linear, background 0.15s linear !important;',
+      ].join(' ');
+
+      const thumb = doc.createElement('div');
+      thumb.style.cssText = [
+        'position: absolute !important;',
+        'left: 50% !important;',
+        'transform: translateX(-50%) !important;',
+        'width: 16px !important;',
+        'height: 16px !important;',
+        'border-radius: 50% !important;',
+        'background: #ffffff !important;',
+        'border: 3px solid #00ff88 !important;',
+        'box-sizing: border-box !important;',
+        'box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6) !important;',
+        'pointer-events: none !important;',
+      ].join(' ');
+
+      const label = doc.createElement('div');
+      label.textContent = '力度';
+      label.style.cssText = [
+        'font-size: 12px !important;',
+        'line-height: 1 !important;',
+        'letter-spacing: 1px !important;',
+        'color: #e2ebe0 !important;',
+      ].join(' ');
+
+      track.append(fill, thumb);
+      root.append(pct, track, label);
+      doc.body.appendChild(root);
+      _powerLockUi = { root, pct, track, fill, thumb, label };
+      this.bindUiEvents(doc);
+      this.updateUiLabels();
+    },
+
+    bindUiEvents(doc) {
+      const refs = _powerLockUi;
+      if (!refs) return;
+      const { root, track } = refs;
+      const stopEvent = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      const valueFromY = (clientY) => {
+        const rect = track.getBoundingClientRect();
+        if (!rect || rect.height <= 0) return this.value;
+        const ratio = (rect.bottom - clientY) / rect.height;
+        return clamp(Math.round(ratio * 100), POWER_LOCK_MIN_VALUE, POWER_LOCK_MAX_VALUE);
+      };
+      const onDown = (e) => {
+        if (e.button != null && e.button !== 0) return;
+        stopEvent(e);
+        this._dragging = true;
+        try { track.setPointerCapture(e.pointerId); } catch (_) {}
+        this.setValue(valueFromY(e.clientY), { persist: false });
+      };
+      const onMove = (e) => {
+        if (!this._dragging) return;
+        stopEvent(e);
+        this.setValue(valueFromY(e.clientY), { persist: false });
+      };
+      const onUp = (e) => {
+        if (!this._dragging) return;
+        stopEvent(e);
+        this._dragging = false;
+        try {
+          if (track.hasPointerCapture && track.hasPointerCapture(e.pointerId)) {
+            track.releasePointerCapture(e.pointerId);
+          }
+        } catch (_) {}
+        this.saveValue();
+      };
+      track.addEventListener('pointerdown', onDown);
+      track.addEventListener('pointermove', onMove);
+      track.addEventListener('pointerup', onUp);
+      track.addEventListener('pointercancel', onUp);
+      root.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+      root.addEventListener('click', (e) => e.stopPropagation());
+      root.addEventListener('contextmenu', (e) => e.preventDefault());
+    },
+
+    updateUiLabels() {
+      if (!_powerLockUi) return;
+      const v = this.value;
+      const color = v <= 33 ? '#00ff88' : (v <= 66 ? '#ffcc33' : '#ff6655');
+      _powerLockUi.pct.textContent = `${v}%`;
+      _powerLockUi.pct.style.color = color;
+      _powerLockUi.fill.style.height = `${v}%`;
+      _powerLockUi.fill.style.background = color;
+      _powerLockUi.thumb.style.bottom = `calc(${v}% - 8px)`;
+      _powerLockUi.thumb.style.borderColor = color;
+    },
+  };
+
+  function patchPowerLockCore(core) {
+    if (!core || typeof core !== 'object' || _powerLockPatchedCores.has(core)) return;
+    const origShoot = core.shoot;
+    if (typeof origShoot !== 'function') return;
+    try {
+      // 1) 拖动球杆时游戏会反复 setPower(玩家力度)；锁定期间把非零值替换为锁定值，
+      //    保证即使游戏内部提前缓存了力度，最终核心状态仍是锁定值。
+      const origSetPower = core.setPower;
+      if (typeof origSetPower === 'function') {
+        core.setPower = function (p) {
+          try {
+            const inShot = (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked);
+            if (!inShot && powerLock.shouldLockShot() && Number(p) > 0) {
+              return origSetPower.call(this, powerLock.value);
+            }
+          } catch (_) {}
+          return origSetPower.call(this, p);
+        };
+      }
+      // 2) 出杆入口再强制一次，覆盖游戏在 shoot 前最后一次写入力度的时机。
+      core.shoot = function (...args) {
+        try {
+          if (powerLock.shouldLockShot()) {
+            const lockedPower = powerLock.value;
+            if (typeof this.setPower === 'function') this.setPower(lockedPower);
+            else if (typeof core.setPower === 'function') core.setPower(lockedPower);
+          }
+        } catch (_) {}
+        return origShoot.apply(this, args);
+      };
+      _powerLockPatchedCores.add(core);
+    } catch (_) {}
+  }
+
+  const _powerLockShotHookDocs = new WeakSet();
+  function installPowerLockShotFallback(doc) {
+    if (!doc || _powerLockShotHookDocs.has(doc)) return;
+    _powerLockShotHookDocs.add(doc);
+    const apply = (e) => {
+      if (!powerLock.shouldLockShot()) return;
+      try {
+        if (typeof _shotMotionLocked !== 'undefined' && _shotMotionLocked) return;
+      } catch (_) {}
+      const target = e && e.target;
+      if (target && target.closest && target.closest('#snooker-aim-power-lock')) return;
+      // 兜底：如果游戏的出杆入口不是 core.shoot（或已被提前绑定），
+      // 在指针释放阶段再同步一次力度。
+      powerLock.applyToActiveCores();
+    };
+    doc.addEventListener('pointerup', apply, true);
+    doc.addEventListener('mouseup', apply, true);
+    doc.addEventListener('touchend', apply, true);
+  }
+
   function resolveEffectivePower(state) {
     if (!state) return 0;
+
+    // 力度锁定开启时，本杆所有辅助线/HUD 都按锁定值推演；
+    // 自动击球窗口与每日挑战会临时绕过，保持自身推荐力度。
+    if (powerLock.shouldLockAim()) {
+      return clamp(powerLock.value, 0, 100);
+    }
 
     const raw = extractRawStatePower(state);
     if (raw == null || raw <= 0) {
@@ -2053,6 +2482,8 @@
           capturedCore = api;
           _frameOrMatchOver = false;
           NativeWorkerBridge.enableReboundInCore(api);
+          // 出杆力度锁定：包装 core.shoot，在实际出杆前强制写入锁定力度
+          patchPowerLockCore(api);
 
           // 劫持生命周期销毁与清理 (退出房间时立即切断残留数据并清空画布与信息浮标)
           const origDestroy = api.destroy;
@@ -2138,12 +2569,16 @@
   function extractRawState() {
     const tg = getGameGlobal('threeGame');
     if (tg) {
+      patchPowerLockCore(tg.core);
       const s = extractValidState(tg.core) || extractValidState(tg);
       if (s) return s;
     }
 
     const sp = getGameGlobal('SnookerProduct');
     if (sp) {
+      patchPowerLockCore(sp.practice);
+      patchPowerLockCore(sp.core);
+      patchPowerLockCore(sp.threeGame && sp.threeGame.core);
       const s =
         extractValidState(sp.practice) ||
         extractValidState(sp.core) ||
@@ -2155,6 +2590,8 @@
 
     const spl = getGameGlobal('SnookerProductLite');
     if (spl) {
+      patchPowerLockCore(spl.practice);
+      patchPowerLockCore(spl.core);
       const s = extractValidState(spl.practice) || extractValidState(spl.core) || extractValidState(spl);
       if (s) return s;
     }
@@ -2165,6 +2602,7 @@
         return null;
       }
       NativeWorkerBridge.enableReboundInCore(capturedCore);
+      patchPowerLockCore(capturedCore);
       const s = extractValidState(capturedCore);
       if (s) return s;
     }
@@ -2190,6 +2628,8 @@
 
   function triggerStrike(callback, power = 100) {
     const targetPower = clamp(Math.round(Number(power) || 100), 2, 100);
+    // 自动击球（每日挑战/推荐出杆）使用自身推荐力度，临时绕过力度锁定。
+    powerLock.beginAutoShotBypass(4000);
     _lastRequestedShotPower = targetPower;
     _lastRequestedShotAt = performance.now();
     const tg = getGameGlobal('threeGame');
@@ -2206,6 +2646,7 @@
     }
 
     if (targetCore) {
+      patchPowerLockCore(targetCore);
       // 1. 设置智能力度
       try {
         if (typeof targetCore.setPower === 'function') {
@@ -4078,8 +4519,11 @@
     _boundTapDocs.add(doc);
 
     const handleTap = (clientX, clientY, target) => {
-      // 严格排除控制面板与其子元素
-      if (target && target.closest && target.closest('#snooker-aim-panel')) return;
+      // 严格排除控制面板与左侧力度锁定滑动条
+      if (target && target.closest && (
+        target.closest('#snooker-aim-panel') ||
+        target.closest('#snooker-aim-power-lock')
+      )) return;
 
       const now = performance.now();
       const dt = now - _lastScreenTapTime;
@@ -4137,6 +4581,7 @@
     if (!doc || _boundKeyDocs.has(doc)) return;
     _boundKeyDocs.add(doc);
     bindScreenDoubleTap(doc);
+    installPowerLockShotFallback(doc);
     doc.addEventListener('keydown', (e) => {
       if (e.ctrlKey || e.metaKey) return;
       const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
@@ -4335,7 +4780,7 @@
       if (!win || depth > 5) return;
       try {
         if (win !== window && win.document) {
-          win.document.querySelectorAll('#snooker-aim-panel, #snooker-mobile-dock').forEach((el) => el.remove());
+          win.document.querySelectorAll('#snooker-aim-panel, #snooker-mobile-dock, #snooker-aim-power-lock').forEach((el) => el.remove());
           win.document.querySelectorAll('#snooker-aim-hud-pill').forEach((el) => {
             if (typeof hudPill === 'undefined' || el !== hudPill.el) el.remove();
           });
@@ -7067,6 +7512,8 @@
   // 不能用 resolveEffectivePower() 的 0 结果覆盖 shot.power。
   function resolveShotSnapshotPower(state) {
     if (!state) return null;
+    // 手动出杆时冻结快照必须使用锁定力度；自动击球窗口会绕过。
+    if (powerLock.shouldLockAim()) return clamp(powerLock.value, 0, 100);
     const candidates = [
       state.shot && state.shot.power,
       state.shot && state.shot.force,
@@ -10172,6 +10619,9 @@
           if (key === 'showHudPill' && !cb.checked) {
             hudPill.hide();
           }
+          if (key === 'powerLockEnabled') {
+            powerLock.setEnabled(cb.checked);
+          }
           saveToggles();
         };
         this._checkboxes[key] = cb;
@@ -10197,6 +10647,7 @@
 
 
       row('信息浮标', 'showHudPill');
+      row('开启出杆力度锁定', 'powerLockEnabled');
       row('调试信息', 'showDebug');
 
       const tipHint = document.createElement('div');
@@ -10618,6 +11069,14 @@
       }
     }
 
+    // 力度锁定滑动条同样保持单例
+    const powerLocks = document.querySelectorAll('#snooker-aim-power-lock');
+    if (powerLocks.length > 1 && _powerLockUi && _powerLockUi.root) {
+      for (const el of powerLocks) {
+        if (el !== _powerLockUi.root) el.remove();
+      }
+    }
+
     const targetDoc = overlay.getTargetDoc();
     const overlays = targetDoc.querySelectorAll('#snooker-aim-overlay');
     if (overlays.length > 1 && overlay.canvas) {
@@ -10684,6 +11143,11 @@
       const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
+
+      // 力度锁定滑动条只跟随开关显示；跨 iframe 时由面板所在窗口统一显示。
+      try {
+        powerLock.updateVisibility(true);
+      } catch (_) {}
 
       // 【每日挑战全自动 v1.7.11】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
       try {
@@ -10845,6 +11309,7 @@
           _settledRawPower = resolveSettledPowerBaseline(state);
           // 本杆已结束：清掉上一杆的力度兜底，下一杆必须重新观测/重建。
           resetShotPowerFallbacks();
+          powerLock.endAutoShotBypass();
         } else {
           // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
           _shotMotionLocked = true;
@@ -10863,6 +11328,7 @@
             overlay.clear();
             _settledRawPower = resolveSettledPowerBaseline(state);
             resetShotPowerFallbacks();
+            powerLock.endAutoShotBypass();
           } else if (!forceShow) {
             if (typeof TrajectoryRecorder !== 'undefined') {
               TrajectoryRecorder.onFrame(state);
@@ -10936,6 +11402,7 @@
           _settledRawPower = resolveSettledPowerBaseline(state);
           // 本杆已结束：清掉上一杆的力度兜底，下一杆必须重新观测/重建。
           resetShotPowerFallbacks();
+          powerLock.endAutoShotBypass();
         }
         _shotHiddenSince = 0;
       }
@@ -11073,6 +11540,7 @@
     pollCoreNamespace();
     loadToggles();
     ensureUiBuilt();
+    try { powerLock.syncFromConfig(); } catch (_) {}
     try {
       engineSim.load();
     } catch (_) {}
@@ -11114,6 +11582,7 @@
       formatTipEnglish,
       resolveEffectiveTip,
       resolveEffectivePower,
+      powerLock,
       resetTurnPowerState,
       extractRawStatePower,
       buildStateKeys,
