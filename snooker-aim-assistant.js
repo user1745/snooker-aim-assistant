@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.15
+// @version      1.9.17
 // @description  目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs蓝色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间蓝线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.15';
+  const SCRIPT_VERSION = '1.9.17';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1046,6 +1046,23 @@
         }
       }
 
+      // v1.9.17：橙色实线复用官方引擎的「第一库前真实路径」。
+      // targetPath 是从碰后到最终停点的整段轨迹；橙色线只负责第一库/袋口之前，
+      // 因此这里按第一次碰库事件切出前段。无碰库（含直接落袋/中途停球）时保留整段。
+      const targetPathBeforeRail = (targetFirstRailT != null)
+        ? sample(targetId, 6, 0, targetFirstRailT)
+        : targetPath.slice();
+      // 采样在碰库事件前最后一帧可能还差十几毫米才到库边；把碰库后的首个轨迹点
+      // 作为第一库接触点补进来，橙色线才能真正停在库边，而不是停在库边前。
+      if (targetPathBeforeRail.length && targetPathAfterRail.length >= 1) {
+        const railContact = targetPathAfterRail[0];
+        const lastBefore = targetPathBeforeRail[targetPathBeforeRail.length - 1];
+        if (railContact && Number.isFinite(railContact.x) && Number.isFinite(railContact.y) &&
+            lastBefore && Math.hypot(railContact.x - lastBefore.x, railContact.y - lastBefore.y) > 0.01) {
+          targetPathBeforeRail.push({ x: railContact.x, y: railContact.y });
+        }
+      }
+
       // 库边阻尼与旋转损耗定标 (根据 39 杆实测数据真实拟合，低杆与多次碰库不再过度截断)
       if (cuePath.length >= 2) {
         const railBounces = events.filter((e) => e.type === 'ball-hit-rail' &&
@@ -1078,6 +1095,7 @@
         hit: true,
         targetId,
         targetPath,
+        targetPathBeforeRail,
         targetFirstRailT,
         targetPathAfterRail,
         cuePath,
@@ -1807,18 +1825,29 @@
 
   function extractRawStatePower(state) {
     if (!state) return null;
-    // 优先取游戏渲染层实时力度 state.power（拉杆时实时变动，未拉杆或停球后为 0）
+    // 优先取游戏渲染层实时力度 state.power（拉杆时实时变动，未拉杆或停球后为 0）。
+    // 0 是合法状态，不能因为 state.power 为 0 就继续回退到上一杆的 shot.power。
+    if (state.power != null && Number.isFinite(Number(state.power)) && Number(state.power) > 0) {
+      return Number(state.power);
+    }
+    // v1.9.16：aim.power 是当前瞄准/蓄力力度，未蓄力时就是 0。
+    // 旧逻辑用 >0 过滤，0 会掉进下面的 shot.power 分支；而 shot.power 保存的是
+    // 上一杆的出杆力度，导致第 n+1 杆未出杆就继承第 n 杆的力度、HUD 与辅助线。
+    if (state.aim && state.aim.power != null && Number.isFinite(Number(state.aim.power))) {
+      return Number(state.aim.power);
+    }
+    // 没有 aim 时，才允许使用 state.power 的 0。
     if (state.power != null && Number.isFinite(Number(state.power))) {
       return Number(state.power);
     }
-    if (state.aim && Number.isFinite(Number(state.aim.power)) && Number(state.aim.power) > 0) {
-      return Number(state.aim.power);
-    }
-    if (state.shot && Number.isFinite(Number(state.shot.power)) && Number(state.shot.power) > 0) {
-      return Number(state.shot.power);
-    }
-    if (state.cue && Number.isFinite(Number(state.cue.power)) && Number(state.cue.power) > 0) {
-      return Number(state.cue.power);
+    // 只有确实处于击球/球体运动阶段，才允许 shot/cue 力度兜底。
+    if (isShotOrMoving(state)) {
+      if (state.shot && Number.isFinite(Number(state.shot.power)) && Number(state.shot.power) > 0) {
+        return Number(state.shot.power);
+      }
+      if (state.cue && Number.isFinite(Number(state.cue.power)) && Number(state.cue.power) > 0) {
+        return Number(state.cue.power);
+      }
     }
     return null;
   }
@@ -6324,6 +6353,20 @@
       String(engine.targetId) === String(targetBall.id)
     );
 
+    // v1.9.17：橙色实线不再只借 targetPath 的总长度，而是直接复用它的
+    // 「第一库前真实路径」。这样切球、侧旋、先碰球/先碰库时的橙色终点
+    // 也来自官方逐帧轨迹，而不是沿绿色几何线截一个标量长度。
+    let engineTargetPathBeforeRail = null;
+    let engineTargetBeforeRailMm = null;
+    if (engineTargetMatches && !engine.stale &&
+        Array.isArray(engine.targetPathBeforeRail) && engine.targetPathBeforeRail.length >= 2) {
+      const beforeRailMm = polylineLength(engine.targetPathBeforeRail);
+      if (Number.isFinite(beforeRailMm) && beforeRailMm > 0) {
+        engineTargetPathBeforeRail = engine.targetPathBeforeRail;
+        engineTargetBeforeRailMm = beforeRailMm;
+      }
+    }
+
     // 【精度优先】官方引擎的 targetPath 是目标球碰后到真实停点的完整逐帧轨迹。
     // 用它的总长度作为目标球行程预算，直接复用官方碰后速度、滑-滚转换与库边/球体
     // 碰撞结果，避免本地经验公式在不同力度下出现“有时多跑、有时少跑”的双向误差。
@@ -6570,6 +6613,11 @@
             V.dist(cue.pos, G),
             clamp(V.dot(d, n), 0.08, 1)
           )),
+      // v1.9.17：橙色实线优先使用官方引擎的「第一库前真实路径」。
+      // 引擎不可用或结果 stale 时为 null，绘制层回退到原来的绿线长度截断。
+      orangePath: engineTargetPathBeforeRail,
+      orangeReachMm: Number.isFinite(Number(engineTargetBeforeRailMm))
+        ? Number(engineTargetBeforeRailMm) : null,
       source: (engine && engine.hit) ? 'engineSim' : (physics ? 'engine' : 'geometry'),
       cushionHug: pocket?.cushionHug || checkCushionHug(targetBall.pos, tableBoundsObj),
     };
@@ -7223,6 +7271,10 @@
       cutAngleDeg: Number.isFinite(Number(t.cutAngleDeg)) ? Number(t.cutAngleDeg) : null,
       pathLengthMm: Number.isFinite(Number(t.pathLengthMm)) ? Number(t.pathLengthMm) : null,
       targetReachMm: Number.isFinite(Number(t.targetReachMm)) ? Number(t.targetReachMm) : null,
+      // v1.9.17：橙色线若使用官方第一库前路径，冻结快照也必须保留这条路径，
+      // 否则出杆瞬间会退回绿色几何线截断，造成橙色线突变。
+      orangePath: snapshotPoints(t.orangePath),
+      orangeReachMm: Number.isFinite(Number(t.orangeReachMm)) ? Number(t.orangeReachMm) : null,
       noFirstRail: Boolean(t.noFirstRail),
     } : null;
     return {
@@ -9203,16 +9255,28 @@
           (t.targetReachMm != null ? t.targetReachMm : pred.actualReachMm)
         );
         const minBarMm = Math.max(1, Number(CONFIG.targetReachBarMinMm) || 5);
-        if (Number.isFinite(reachMm) && reachMm > minBarMm) {
+        // v1.9.17：官方引擎给出第一库前真实路径时，橙色线直接沿这条路径绘制；
+        // 不再把「总长度」套到绿色几何线上。引擎不可用/结果 stale 时才回退旧逻辑。
+        const engineOrangePath = (Array.isArray(t.orangePath) && t.orangePath.length >= 2)
+          ? t.orangePath : null;
+        const engineOrangeLen = engineOrangePath ? polylineLength(engineOrangePath) : 0;
+        const hasEngineOrange = Boolean(engineOrangePath);
+        const hasFallbackReach = Number.isFinite(reachMm) && reachMm > minBarMm;
+        if (hasEngineOrange || hasFallbackReach) {
           const preRailEnd = t.pocket
             ? (t.pocket.enterPoint || t.pocket.opening || t.objectEnd)
             : (t.objectEnd || null);
           const preRailLen = (t.ball && t.ball.pos && preRailEnd)
             ? V.dist(t.ball.pos, preRailEnd)
             : polylineLength(t.objectPath);
-          const barLenMm = Math.min(reachMm, preRailLen);
-          if (barLenMm > minBarMm) {
-            let barPts = trimPolyline(t.objectPath, barLenMm);
+          const barLenMm = Number.isFinite(reachMm)
+            ? Math.min(reachMm, preRailLen)
+            : preRailLen;
+          // 有官方路径时即使它很短也优先使用；只有官方路径不可用时才走长度截断兜底。
+          if ((hasEngineOrange && engineOrangeLen > minBarMm) || (!hasEngineOrange && barLenMm > minBarMm)) {
+            let barPts = hasEngineOrange
+              ? engineOrangePath
+              : trimPolyline(t.objectPath, barLenMm);
             if (inMotion) {
               barPts = trimTargetReachBarFromLive(barPts, liveTargetPos, liveTargetPotted);
             }
@@ -9399,7 +9463,7 @@
       this.maskOccludingBalls(allBalls, drawnSegments, ghostPx);
 
       // 5) 屏幕正上方切角与出杆状态信息浮标 (实时显示出杆加塞与力度，外框颜色动态变化)
-      if (CONFIG.showHudPill) {
+      if (CONFIG.showHudPill && currentEffPower > 0) {
         const effPower = currentEffPower;
         const tipText = formatTipEnglish(pred.tip || (pred.shot && pred.shot.tip));
         const potWarning = (effPower > 0 && pred.cuePottedWarning) ? ' · ⚠️母球摔袋' : '';
