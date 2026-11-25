@@ -2192,17 +2192,17 @@
           ? [
             'width: 0 !important;',
             'height: 0 !important;',
-            'border-left: 17px solid transparent !important;',
-            'border-right: 17px solid transparent !important;',
-            'border-bottom: 29.44px solid #e2ebe0 !important;',
+            'border-left: 11.33px solid transparent !important;',
+            'border-right: 11.33px solid transparent !important;',
+            'border-bottom: 19.63px solid #e2ebe0 !important;',
             'pointer-events: none !important;',
           ].join(' ')
           : [
             'width: 0 !important;',
             'height: 0 !important;',
-            'border-left: 17px solid transparent !important;',
-            'border-right: 17px solid transparent !important;',
-            'border-top: 29.44px solid #e2ebe0 !important;',
+            'border-left: 11.33px solid transparent !important;',
+            'border-right: 11.33px solid transparent !important;',
+            'border-top: 19.63px solid #e2ebe0 !important;',
             'pointer-events: none !important;',
           ].join(' ');
         btn.appendChild(tri);
