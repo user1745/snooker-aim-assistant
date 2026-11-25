@@ -2154,6 +2154,33 @@
         'pointer-events: none !important;',
       ].join(' ');
 
+      const makeStepButton = (text, title) => {
+        const btn = doc.createElement('div');
+        btn.textContent = text;
+        btn.title = title;
+        btn.style.cssText = [
+          'width: 22px !important;',
+          'height: 16px !important;',
+          'display: flex !important;',
+          'align-items: center !important;',
+          'justify-content: center !important;',
+          'box-sizing: border-box !important;',
+          'border-radius: 4px !important;',
+          'background: rgba(255, 255, 255, 0.08) !important;',
+          'color: #e2ebe0 !important;',
+          'font-size: 10px !important;',
+          'line-height: 1 !important;',
+          'cursor: pointer !important;',
+          'pointer-events: auto !important;',
+          'user-select: none !important;',
+          '-webkit-user-select: none !important;',
+          'touch-action: none !important;',
+        ].join(' ');
+        return btn;
+      };
+      const upBtn = makeStepButton('▲', '力度 +1');
+      const downBtn = makeStepButton('▼', '力度 -1');
+
       const label = doc.createElement('div');
       label.textContent = '力度';
       label.style.cssText = [
@@ -2165,9 +2192,9 @@
       ].join(' ');
 
       track.append(fill, thumb);
-      root.append(pct, track, label);
+      root.append(pct, upBtn, track, downBtn, label);
       doc.body.appendChild(root);
-      _powerLockUi = { root, pct, track, fill, thumb, label };
+      _powerLockUi = { root, pct, upBtn, track, downBtn, fill, thumb, label };
       this.bindUiEvents(doc);
       this.updateUiLabels();
     },
@@ -2175,7 +2202,7 @@
     bindUiEvents(doc) {
       const refs = _powerLockUi;
       if (!refs) return;
-      const { root, track } = refs;
+      const { root, track, upBtn, downBtn } = refs;
       let pendingY = null;
       let rafId = 0;
       const stopEvent = (e) => {
@@ -2243,6 +2270,21 @@
       track.addEventListener('pointermove', onMove);
       track.addEventListener('pointerup', onUp);
       track.addEventListener('pointercancel', onUp);
+
+      const bindStepButton = (btn, delta) => {
+        if (!btn) return;
+        const stopOnly = (e) => e.stopPropagation();
+        btn.addEventListener('pointerdown', stopOnly);
+        btn.addEventListener('pointerup', stopOnly);
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.setValue(this.value + delta);
+        });
+      };
+      bindStepButton(upBtn, 1);
+      bindStepButton(downBtn, -1);
+
       root.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
       root.addEventListener('click', (e) => e.stopPropagation());
       root.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -2258,6 +2300,16 @@
       _powerLockUi.fill.style.background = color;
       _powerLockUi.thumb.style.bottom = `calc(${v}% - 8px)`;
       _powerLockUi.thumb.style.borderColor = color;
+      if (_powerLockUi.upBtn) {
+        const atMax = v >= POWER_LOCK_MAX_VALUE;
+        _powerLockUi.upBtn.style.opacity = atMax ? '0.3' : '1';
+        _powerLockUi.upBtn.style.cursor = atMax ? 'default' : 'pointer';
+      }
+      if (_powerLockUi.downBtn) {
+        const atMin = v <= POWER_LOCK_MIN_VALUE;
+        _powerLockUi.downBtn.style.opacity = atMin ? '0.3' : '1';
+        _powerLockUi.downBtn.style.cursor = atMin ? 'default' : 'pointer';
+      }
     },
   };
 
