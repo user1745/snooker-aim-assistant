@@ -2077,9 +2077,10 @@
 
       const root = doc.createElement('div');
       root.id = 'snooker-aim-power-lock';
+      // 基准左边距 14px，再右移 1.5 个背景宽度（34px × 1.5 = 51px），合计 65px。
       root.style.cssText = [
         'position: fixed !important;',
-        'left: 14px !important;',
+        'left: 65px !important;',
         'top: 50% !important;',
         'transform: translateY(-50%) !important;',
         'z-index: 2147483647 !important;',
@@ -2175,6 +2176,8 @@
       const refs = _powerLockUi;
       if (!refs) return;
       const { root, track } = refs;
+      let pendingY = null;
+      let rafId = 0;
       const stopEvent = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -2185,28 +2188,56 @@
         const ratio = (rect.bottom - clientY) / rect.height;
         return clamp(Math.round(ratio * 100), POWER_LOCK_MIN_VALUE, POWER_LOCK_MAX_VALUE);
       };
+      const commitY = (clientY) => {
+        if (!Number.isFinite(clientY)) return;
+        // 拖动期间只更新本地数值与 UI，不访问游戏 core / 不走跨窗口查找，
+        // 避免快速滑动时每帧 setPower 造成明显的跟手滞后。
+        this.setValue(valueFromY(clientY), { persist: false, apply: false });
+      };
+      const scheduleMove = (clientY) => {
+        pendingY = clientY;
+        if (rafId) return;
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          const y = pendingY;
+          pendingY = null;
+          commitY(y);
+        });
+      };
+      const flushMove = (clientY) => {
+        if (rafId) {
+          try { cancelAnimationFrame(rafId); } catch (_) {}
+          rafId = 0;
+        }
+        const y = (clientY != null) ? clientY : pendingY;
+        pendingY = null;
+        commitY(y);
+      };
       const onDown = (e) => {
         if (e.button != null && e.button !== 0) return;
         stopEvent(e);
         this._dragging = true;
         try { track.setPointerCapture(e.pointerId); } catch (_) {}
-        this.setValue(valueFromY(e.clientY), { persist: false });
+        flushMove(e.clientY);
       };
       const onMove = (e) => {
         if (!this._dragging) return;
         stopEvent(e);
-        this.setValue(valueFromY(e.clientY), { persist: false });
+        scheduleMove(e.clientY);
       };
       const onUp = (e) => {
         if (!this._dragging) return;
         stopEvent(e);
         this._dragging = false;
+        flushMove(e.clientY);
         try {
           if (track.hasPointerCapture && track.hasPointerCapture(e.pointerId)) {
             track.releasePointerCapture(e.pointerId);
           }
         } catch (_) {}
         this.saveValue();
+        // 松手时同步一次游戏 core 力度；实际出杆仍由 shoot 拦截再次强制。
+        this.applyToActiveCores();
       };
       track.addEventListener('pointerdown', onDown);
       track.addEventListener('pointermove', onMove);
@@ -4580,20 +4611,6 @@
       if (e.ctrlKey || e.metaKey) return;
       const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
-
-      // 【快捷键】Space 空格键触发每日挑战自动化击球 (启动/暂停)
-      if (e.code === 'Space' || e.key === ' ') {
-        DailyChallengeEngine.toggle();
-        try {
-          if (typeof DailyRunner !== 'undefined' && DailyRunner) {
-            if (DailyChallengeEngine.running) DailyRunner.resume();
-            else DailyRunner.pause('');
-          }
-        } catch (_) {}
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
 
       // 【快捷键】Escape 键退出/停止自动化击球
       if (e.code === 'Escape' || e.key === 'Escape') {
@@ -10486,7 +10503,7 @@
       row('调试信息', 'showDebug');
 
       const tipHint = document.createElement('div');
-      tipHint.textContent = '💡 提示: 单指双击屏幕可隐藏/重新显示控制面板 (空格键亦可启停自动击球)';
+      tipHint.textContent = '💡 提示: 单指双击屏幕可隐藏/重新显示控制面板';
       tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
       this.body.appendChild(tipHint);
 
