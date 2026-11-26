@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.18
-// @description  母球落位预测精度深度升级(整合snk-core同源内核live物理参数直连/core.getPower与core.getTip输入对齐及0.5圆盘截断/消除仰角残留/同步影子仿真直出零人为截断/二次碰球尾段续接/空台多库引擎全行程/出杆瞬间as-struck复核)、目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs白色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.9.19
+// @description  母球落位预测精度深度升级(整合snk-core同源内核live物理参数直连/core.getPower与core.getTip输入对齐及0.5圆盘截断/消除仰角残留/同步影子仿真直出零人为截断/二次碰球尾段续接/空台多库引擎全行程/出杆瞬间as-struck复核)、目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.18';
+  const SCRIPT_VERSION = '1.9.19';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -8455,453 +8455,6 @@
     return null;
   }
 
-  /* ================================================================== */
-  /* 点与折线欧氏几何工具函数 (用于真实走位与预测折线距离误差计算)        */
-  /* ================================================================== */
-
-  function distToSegmentSquared(p, v, w) {
-    const l2 = (v.x - w.x) * (v.x - w.x) + (v.y - w.y) * (v.y - w.y);
-    if (l2 === 0) return (p.x - v.x) * (p.x - v.x) + (p.y - v.y) * (p.y - v.y);
-    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
-    t = Math.max(0, Math.min(1, t));
-    const projX = v.x + t * (w.x - v.x);
-    const projY = v.y + t * (w.y - v.y);
-    return (p.x - projX) * (p.x - projX) + (p.y - projY) * (p.y - projY);
-  }
-
-  function distPointToPolyline(p, polyline) {
-    if (!p || !Array.isArray(polyline) || polyline.length === 0) return 0;
-    if (polyline.length === 1) return Math.hypot(p.x - polyline[0].x, p.y - polyline[0].y);
-    let minDistSq = Infinity;
-    for (let i = 0; i < polyline.length - 1; i++) {
-      const dSq = distToSegmentSquared(p, polyline[i], polyline[i + 1]);
-      if (dSq < minDistSq) minDistSq = dSq;
-    }
-    return Math.sqrt(minDistSq);
-  }
-
-  /* ================================================================== */
-  /* 真实走位 vs 白色落位预测线 录制与对比导出引擎 (v1.7.7)                 */
-  /* ================================================================== */
-
-  const TrajectoryRecorder = {
-    isRecording: false,
-    records: [],
-    activeSession: null,
-
-    toggleRecording() {
-      this.isRecording = !this.isRecording;
-      if (this.isRecording) {
-        showToast('🔴 已开启轨迹录制，击打目标球将自动记录走位', 1800);
-      } else {
-        const count = this.records.length;
-        showToast(`⏹️ 已停止轨迹录制 (当前已存 ${count} 杆数据)`, 1800);
-      }
-      if (ui && typeof ui.updateRecordButtons === 'function') {
-        ui.updateRecordButtons();
-      }
-    },
-
-    onShotStart(state, pred) {
-      if (!this.isRecording) return;
-      if (!pred) return;
-
-      const cueBall = getCueBall(state);
-      const cuePos = extractBallPos(cueBall) || (pred.cue ? { x: pred.cue.x, y: pred.cue.y } : null);
-      if (!cuePos) return;
-
-      const targetBall = pred.target?.ball || null;
-      const targetPos = targetBall ? extractBallPos(targetBall) : null;
-      const targetId = targetBall ? (targetBall.id != null ? String(targetBall.id) : null) : null;
-
-      // 提取白色走位预测线的折线点序列
-      const blueLineTrajectory = Array.isArray(pred.cuePostTrajectory)
-        ? pred.cuePostTrajectory.map((p) => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }))
-        : [];
-      const blueRestPos = pred.cueRestPos
-        ? { x: Number(pred.cueRestPos.x.toFixed(2)), y: Number(pred.cueRestPos.y.toFixed(2)) }
-        : (blueLineTrajectory.length > 0 ? blueLineTrajectory[blueLineTrajectory.length - 1] : null);
-
-      // 目标球预测折线
-      const predictedObjectPath = (pred.target && Array.isArray(pred.target.objectPath))
-        ? pred.target.objectPath.map((p) => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }))
-        : [];
-      const predictedTargetReboundSegments = (pred.target
-        && Array.isArray(pred.target.reboundDisplaySegments || pred.target.reboundSegments))
-        ? (pred.target.reboundDisplaySegments || pred.target.reboundSegments).map((seg) => ({
-          from: seg.from ? { x: Number(seg.from.x.toFixed(2)), y: Number(seg.from.y.toFixed(2)) } : null,
-          to: seg.to ? { x: Number(seg.to.x.toFixed(2)), y: Number(seg.to.y.toFixed(2)) } : null,
-          axis: seg.axis || null,
-        }))
-        : [];
-      const predictedTargetReboundPath = (() => {
-        const out = [];
-        const push = (p) => {
-          if (!p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y))) return;
-          const last = out[out.length - 1];
-          if (!last || Math.hypot(last.x - p.x, last.y - p.y) > 0.01) out.push({ x: Number(p.x), y: Number(p.y) });
-        };
-        for (const p of predictedObjectPath) push(p);
-        for (const seg of predictedTargetReboundSegments) {
-          push(seg.from);
-          push(seg.to);
-        }
-        return out;
-      })();
-
-      this.activeSession = {
-        shotId: this.records.length + 1,
-        startTimeMs: performance.now(),
-        dateStr: new Date().toISOString(),
-        shotParams: {
-          power: Math.round(Number(pred.shot?.power ?? pred.power ?? 0)),
-          tip: pred.tip ? { x: Number(Number(pred.tip.x || 0).toFixed(3)), y: Number(Number(pred.tip.y || 0).toFixed(3)) } : { x: 0, y: 0 },
-          aimDir: pred.aimDir ? { x: Number(Number(pred.aimDir.x || 0).toFixed(3)), y: Number(Number(pred.aimDir.y || 0).toFixed(3)) } : null,
-          cutAngleDeg: pred.target?.cutAngleDeg != null ? Math.round(pred.target.cutAngleDeg) : null,
-          targetPocket: pred.target?.pocket?.label || null,
-          method: pred.cuePostMethod || (pred.cuePostTrajectory && pred.cuePostTrajectory.length > 4 ? 'engineSim' : 'algo'),
-        },
-        predicted: {
-          contactPoint: pred.target?.contact ? { x: Number(pred.target.contact.x.toFixed(2)), y: Number(pred.target.contact.y.toFixed(2)) } : null,
-          cueRestPos: blueRestPos,
-          cuePostTrajectory: blueLineTrajectory,
-          objectPath: predictedObjectPath,
-          targetReboundSegments: predictedTargetReboundSegments,
-          targetReboundPath: predictedTargetReboundPath,
-          targetFirstRailPoint: pred.target?.objectEnd ? { x: Number(pred.target.objectEnd.x.toFixed(2)), y: Number(pred.target.objectEnd.y.toFixed(2)) } : null,
-          targetReboundMeta: pred.target?.reboundMeta ? { ...pred.target.reboundMeta, hitBall: undefined } : null,
-          targetBall: targetBall ? { id: targetId, kind: kindLabel(targetBall.kind) } : null,
-        },
-        actual: {
-          initialCuePos: { x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) },
-          initialTargetPos: targetPos ? { x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) } : null,
-          cueTotalPath: [{ tMs: 0, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) }],
-          cuePostImpactPath: [], // 碰球后的真实母球走位轨迹点序列
-          targetBallPath: targetPos ? [{ tMs: 0, x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) }] : [],
-          impactOccurred: false,
-          impactTimeMs: null,
-          impactCuePos: null,
-          impactTargetPos: null,
-          finalCueRestPos: null,
-          finalTargetRestPos: null,
-          targetPotted: false,
-        },
-        targetId: targetId,
-      };
-    },
-
-    onFrame(state) {
-      if (!this.isRecording || !this.activeSession) return;
-      const s = this.activeSession;
-      const now = performance.now();
-      const elapsedMs = Math.round(now - s.startTimeMs);
-
-      const cueBall = getCueBall(state);
-      const cuePos = extractBallPos(cueBall);
-      if (cuePos) {
-        const curCue = { tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
-        const lastCue = s.actual.cueTotalPath[s.actual.cueTotalPath.length - 1];
-        if (!lastCue || Math.hypot(curCue.x - lastCue.x, curCue.y - lastCue.y) >= 0.5) {
-          s.actual.cueTotalPath.push(curCue);
-        }
-      }
-
-      // 跟踪目标球
-      let targetBall = null;
-      if (s.targetId != null && Array.isArray(state?.balls)) {
-        targetBall = state.balls.find((b) => b && (String(b.id) === s.targetId));
-      }
-      const targetPos = targetBall ? extractBallPos(targetBall) : null;
-      if (targetPos) {
-        const curTarget = { tMs: elapsedMs, x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) };
-        const lastTarget = s.actual.targetBallPath[s.actual.targetBallPath.length - 1];
-        if (!lastTarget || Math.hypot(curTarget.x - lastTarget.x, curTarget.y - lastTarget.y) >= 0.5) {
-          s.actual.targetBallPath.push(curTarget);
-        }
-      }
-
-      // 检测撞击目标球的瞬间 (Impact Detection)
-      if (!s.actual.impactOccurred && cuePos && targetPos) {
-        const dist = Math.hypot(cuePos.x - targetPos.x, cuePos.y - targetPos.y);
-        const targetInit = s.actual.initialTargetPos;
-        const targetMoved = targetInit ? Math.hypot(targetPos.x - targetInit.x, targetPos.y - targetInit.y) : 0;
-        // 碰撞判据：中心距离达到两球半径 (<= 53.5mm) 或目标球产生位移 (> 1.2mm)
-        if (dist <= (BALL_RADIUS_MM * 2 + 1.2) || targetMoved > 1.2) {
-          s.actual.impactOccurred = true;
-          s.actual.impactTimeMs = elapsedMs;
-          s.actual.impactCuePos = { x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
-          s.actual.impactTargetPos = { x: Number(targetPos.x.toFixed(2)), y: Number(targetPos.y.toFixed(2)) };
-          s.actual.cuePostImpactPath.push({ tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) });
-        }
-      } else if (s.actual.impactOccurred && cuePos) {
-        // 撞击发生之后：实时记录击打目标球之后的母球实际走位轨迹点
-        const curCue = { tMs: elapsedMs, x: Number(cuePos.x.toFixed(2)), y: Number(cuePos.y.toFixed(2)) };
-        const lastPost = s.actual.cuePostImpactPath[s.actual.cuePostImpactPath.length - 1];
-        if (!lastPost || Math.hypot(curCue.x - lastPost.x, curCue.y - lastPost.y) >= 0.5) {
-          s.actual.cuePostImpactPath.push(curCue);
-        }
-      }
-    },
-
-    computeMetrics(session) {
-      const pred = session.predicted;
-      const actual = session.actual;
-
-      // 1. 最终落位距离误差 (mm)
-      let finalRestErrorMm = null;
-      let deltaXMm = null;
-      let deltaYMm = null;
-      if (actual.finalCueRestPos && pred.cueRestPos) {
-        deltaXMm = Number((actual.finalCueRestPos.x - pred.cueRestPos.x).toFixed(2));
-        deltaYMm = Number((actual.finalCueRestPos.y - pred.cueRestPos.y).toFixed(2));
-        finalRestErrorMm = Number(Math.hypot(deltaXMm, deltaYMm).toFixed(2));
-      }
-
-      // 2. 假想球撞击点误差 (mm)
-      let contactPointErrorMm = null;
-      if (actual.impactCuePos && pred.contactPoint) {
-        contactPointErrorMm = Number(Math.hypot(
-          actual.impactCuePos.x - pred.contactPoint.x,
-          actual.impactCuePos.y - pred.contactPoint.y
-        ).toFixed(2));
-      }
-
-      // 3. 走位轨迹与白色预测折线离线偏离度 (mm)
-      const postPath = (actual.cuePostImpactPath && actual.cuePostImpactPath.length > 0)
-        ? actual.cuePostImpactPath
-        : actual.cueTotalPath;
-      const blueLine = pred.cuePostTrajectory || [];
-
-      let maxTrajectoryDeviationMm = 0;
-      let meanTrajectoryDeviationMm = 0;
-      if (postPath.length > 0 && blueLine.length >= 2) {
-        let totalDev = 0;
-        let maxDev = 0;
-        for (const pt of postPath) {
-          const dev = distPointToPolyline(pt, blueLine);
-          totalDev += dev;
-          if (dev > maxDev) maxDev = dev;
-        }
-        meanTrajectoryDeviationMm = Number((totalDev / postPath.length).toFixed(2));
-        maxTrajectoryDeviationMm = Number(maxDev.toFixed(2));
-      }
-
-      // 4. 行进总路程对比 (mm)
-      let actualTravelLengthMm = 0;
-      for (let i = 1; i < postPath.length; i++) {
-        actualTravelLengthMm += Math.hypot(postPath[i].x - postPath[i - 1].x, postPath[i].y - postPath[i - 1].y);
-      }
-      actualTravelLengthMm = Number(actualTravelLengthMm.toFixed(1));
-
-      let predictedTravelLengthMm = 0;
-      for (let i = 1; i < blueLine.length; i++) {
-        predictedTravelLengthMm += Math.hypot(blueLine[i].x - blueLine[i - 1].x, blueLine[i].y - blueLine[i - 1].y);
-      }
-      predictedTravelLengthMm = Number(predictedTravelLengthMm.toFixed(1));
-
-      // 目标球吃库反弹折线 vs 真实目标球轨迹
-      const targetPredPath = Array.isArray(pred.targetReboundPath) ? pred.targetReboundPath : [];
-      const targetActualAll = Array.isArray(actual.targetBallPath) ? actual.targetBallPath : [];
-      const targetActualPost = actual.impactTimeMs != null
-        ? targetActualAll.filter((p) => p.tMs >= actual.impactTimeMs)
-        : targetActualAll;
-      let targetReboundMaxDeviationMm = null;
-      let targetReboundMeanDeviationMm = null;
-      let targetFirstRailErrorMm = null;
-      let targetActualTravelLengthMm = 0;
-      let targetPredictedTravelLengthMm = 0;
-      if (targetActualPost.length > 0 && targetPredPath.length >= 2) {
-        let totalDev = 0;
-        let maxDev = 0;
-        for (const pt of targetActualPost) {
-          const dev = distPointToPolyline(pt, targetPredPath);
-          totalDev += dev;
-          if (dev > maxDev) maxDev = dev;
-        }
-        targetReboundMeanDeviationMm = Number((totalDev / targetActualPost.length).toFixed(2));
-        targetReboundMaxDeviationMm = Number(maxDev.toFixed(2));
-      }
-      if (pred.targetFirstRailPoint && targetActualPost.length > 0) {
-        let minDist = Infinity;
-        for (const pt of targetActualPost) {
-          const d = Math.hypot(pt.x - pred.targetFirstRailPoint.x, pt.y - pred.targetFirstRailPoint.y);
-          if (d < minDist) minDist = d;
-        }
-        if (Number.isFinite(minDist)) targetFirstRailErrorMm = Number(minDist.toFixed(2));
-      }
-      for (let i = 1; i < targetActualPost.length; i++) {
-        targetActualTravelLengthMm += Math.hypot(
-          targetActualPost[i].x - targetActualPost[i - 1].x,
-          targetActualPost[i].y - targetActualPost[i - 1].y
-        );
-      }
-      for (let i = 1; i < targetPredPath.length; i++) {
-        targetPredictedTravelLengthMm += Math.hypot(
-          targetPredPath[i].x - targetPredPath[i - 1].x,
-          targetPredPath[i].y - targetPredPath[i - 1].y
-        );
-      }
-      targetActualTravelLengthMm = Number(targetActualTravelLengthMm.toFixed(1));
-      targetPredictedTravelLengthMm = Number(targetPredictedTravelLengthMm.toFixed(1));
-
-      // 5. 综合吻合度等级判定
-      let accuracyRating = '未知';
-      if (Number.isFinite(finalRestErrorMm)) {
-        if (finalRestErrorMm < 15) accuracyRating = '🎯 极高吻合 (<15mm)';
-        else if (finalRestErrorMm < 35) accuracyRating = '🟢 良好吻合 (<35mm)';
-        else if (finalRestErrorMm < 70) accuracyRating = '🟡 中度吻合 (<70mm)';
-        else accuracyRating = '🔴 偏差较大 (≥70mm)';
-      }
-
-      return {
-        finalRestErrorMm,
-        deltaXMm,
-        deltaYMm,
-        contactPointErrorMm,
-        maxTrajectoryDeviationMm,
-        meanTrajectoryDeviationMm,
-        actualTravelLengthMm,
-        predictedTravelLengthMm,
-        travelLengthDiffMm: Number((actualTravelLengthMm - predictedTravelLengthMm).toFixed(1)),
-        targetReboundMaxDeviationMm,
-        targetReboundMeanDeviationMm,
-        targetFirstRailErrorMm,
-        targetActualTravelLengthMm,
-        targetPredictedTravelLengthMm,
-        targetTravelLengthDiffMm: Number((targetActualTravelLengthMm - targetPredictedTravelLengthMm).toFixed(1)),
-        accuracyRating,
-      };
-    },
-
-    onShotEnd(state) {
-      if (!this.isRecording || !this.activeSession) return;
-      const s = this.activeSession;
-      this.activeSession = null;
-
-      const cueBall = getCueBall(state);
-      const finalCuePos = extractBallPos(cueBall);
-      if (finalCuePos) {
-        s.actual.finalCueRestPos = { x: Number(finalCuePos.x.toFixed(2)), y: Number(finalCuePos.y.toFixed(2)) };
-      } else if (s.actual.cueTotalPath.length > 0) {
-        const last = s.actual.cueTotalPath[s.actual.cueTotalPath.length - 1];
-        s.actual.finalCueRestPos = { x: last.x, y: last.y };
-      }
-
-      let targetBall = null;
-      if (s.targetId != null && Array.isArray(state?.balls)) {
-        targetBall = state.balls.find((b) => b && (String(b.id) === s.targetId));
-      }
-      if (targetBall) {
-        s.actual.targetPotted = Boolean(targetBall.potted);
-        const tPos = extractBallPos(targetBall);
-        if (tPos) s.actual.finalTargetRestPos = { x: Number(tPos.x.toFixed(2)), y: Number(tPos.y.toFixed(2)) };
-      }
-
-      // 如果未曾触发碰撞判定，以母球与目标球距离最近点兜底切分
-      if (!s.actual.impactOccurred && s.actual.initialTargetPos) {
-        let minDist = Infinity;
-        let bestIdx = 0;
-        const tInit = s.actual.initialTargetPos;
-        for (let i = 0; i < s.actual.cueTotalPath.length; i++) {
-          const pt = s.actual.cueTotalPath[i];
-          const d = Math.hypot(pt.x - tInit.x, pt.y - tInit.y);
-          if (d < minDist) {
-            minDist = d;
-            bestIdx = i;
-          }
-        }
-        if (minDist <= BALL_RADIUS_MM * 2 + 10) {
-          s.actual.impactOccurred = true;
-          s.actual.impactCuePos = { x: s.actual.cueTotalPath[bestIdx].x, y: s.actual.cueTotalPath[bestIdx].y };
-          s.actual.cuePostImpactPath = s.actual.cueTotalPath.slice(bestIdx);
-        }
-      }
-
-      // 确保撞击后轨迹末端包含停球终点
-      if (s.actual.finalCueRestPos && s.actual.cuePostImpactPath.length > 0) {
-        const lastPost = s.actual.cuePostImpactPath[s.actual.cuePostImpactPath.length - 1];
-        if (Math.hypot(lastPost.x - s.actual.finalCueRestPos.x, lastPost.y - s.actual.finalCueRestPos.y) > 0.1) {
-          s.actual.cuePostImpactPath.push({
-            tMs: Math.round(performance.now() - s.startTimeMs),
-            x: s.actual.finalCueRestPos.x,
-            y: s.actual.finalCueRestPos.y,
-          });
-        }
-      }
-
-      // 计算量化对比指标
-      s.comparisonMetrics = this.computeMetrics(s);
-
-      // 归档存入记录列表
-      this.records.push(s);
-
-      // 更新界面按钮状态与调试信息
-      if (ui && typeof ui.updateRecordButtons === 'function') {
-        ui.updateRecordButtons();
-      }
-
-      const err = s.comparisonMetrics?.finalRestErrorMm;
-      const errStr = err != null ? `${err.toFixed(1)}mm` : '未知';
-      showToast(`🎯 已记录第 ${this.records.length} 杆走位 (母球落位误差: ${errStr})`, 2200);
-      console.log(`[SnookerAimAssistant] 击球录制 #${s.shotId} 完成:`, s);
-    },
-
-    exportRecords() {
-      if (this.records.length === 0) {
-        showToast('⚠️ 暂无录制的击球数据，请先击球录制', 1800);
-        return;
-      }
-
-      const errors = this.records.map((r) => r.comparisonMetrics?.finalRestErrorMm).filter(Number.isFinite);
-      const avgError = errors.length ? (errors.reduce((a, b) => a + b, 0) / errors.length) : 0;
-      const maxError = errors.length ? Math.max(...errors) : 0;
-      const minError = errors.length ? Math.min(...errors) : 0;
-
-      const exportData = {
-        title: '斯诺克大师 - 真实轨迹 vs 白色走位预测线对比记录',
-        version: SCRIPT_VERSION,
-        exportTime: new Date().toISOString(),
-        totalShots: this.records.length,
-        summary: {
-          averageRestErrorMm: Number(avgError.toFixed(2)),
-          maxRestErrorMm: Number(maxError.toFixed(2)),
-          minRestErrorMm: Number(minError.toFixed(2)),
-        },
-        shots: this.records,
-      };
-
-      try {
-        const jsonStr = JSON.stringify(exportData, null, 2);
-        const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const nowStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        a.href = url;
-        a.download = `snooker-trajectory-compare-${nowStr}.json`;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          a.remove();
-          URL.revokeObjectURL(url);
-        }, 1500);
-
-        showToast(`✅ 成功导出 ${this.records.length} 杆对比记录文件！`, 2500);
-        console.table(this.records.map((r) => ({
-          '杆号': r.shotId,
-          '出杆力度': `${r.shotParams.power}%`,
-          '预测落位(X,Y)': `(${r.predicted.cueRestPos?.x}, ${r.predicted.cueRestPos?.y})`,
-          '实际落位(X,Y)': `(${r.actual.finalCueRestPos?.x}, ${r.actual.finalCueRestPos?.y})`,
-          '落位距离误差': `${r.comparisonMetrics?.finalRestErrorMm?.toFixed(1)}mm`,
-          '走位平均偏差': `${r.comparisonMetrics?.meanTrajectoryDeviationMm?.toFixed(1)}mm`,
-          '评定': r.comparisonMetrics?.accuracyRating || '-',
-        })));
-      } catch (err) {
-        console.error('导出轨迹数据失败:', err);
-        showToast('❌ 导出失败，请检查浏览器权限', 2000);
-      }
-    },
-  };
-
   /**
    * 计算母球瞄准线随母球向前行进的动态裁剪线段：
    * 母球向前滚动时，瞄准线从母球实时球心画到假想球接触点（已走过的后方路径被擦除）；
@@ -10394,6 +9947,8 @@
 
     _circlePos: { left: 0, top: 0 },
     _circlePosInitialized: false,
+    // 收起时的圆圈加号尺寸（原 21px 放大一倍）
+    _circleSize: 42,
 
     loadPanelPos() {
       try {
@@ -10431,8 +9986,8 @@
 
       if (this.collapsed) {
         if (!this._circlePos) return;
-        const safeLeft = clamp(this._circlePos.left, 0, Math.max(0, winW - 21));
-        const safeTop = clamp(this._circlePos.top, 0, Math.max(0, winH - 21));
+        const safeLeft = clamp(this._circlePos.left, 0, Math.max(0, winW - this._circleSize));
+        const safeTop = clamp(this._circlePos.top, 0, Math.max(0, winH - this._circleSize));
         this._circlePos.left = safeLeft;
         this._circlePos.top = safeTop;
         this.panel.style.left = Math.round(safeLeft) + 'px';
@@ -10556,12 +10111,12 @@
         const savedPos = this.loadPanelPos();
         if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) {
           this._circlePos = {
-            left: clamp(savedPos.left, 0, Math.max(0, winW - 21)),
-            top: clamp(savedPos.top, 0, Math.max(0, winH - 21)),
+            left: clamp(savedPos.left, 0, Math.max(0, winW - this._circleSize)),
+            top: clamp(savedPos.top, 0, Math.max(0, winH - this._circleSize)),
           };
         } else {
           this._circlePos = {
-            left: Math.max(8, winW - 35),
+            left: Math.max(8, winW - this._circleSize - 14),
             top: 14,
           };
         }
@@ -10679,6 +10234,31 @@
       ].join(' ');
       this.panel.appendChild(this.body);
 
+      // 控制面板动作按钮统一模板：与“开始自动化完成每日挑战”保持一致。
+      const stylePanelActionButton = (btn, margin) => {
+        btn.style.cssText = [
+          'width: 100% !important;',
+          'padding: 8px 10px !important;',
+          'margin: ' + (margin || '0 0 8px 0') + ' !important;',
+          'border: none !important;',
+          'border-radius: 6px !important;',
+          'font-size: 12.5px !important;',
+          'font-weight: 700 !important;',
+          'cursor: pointer !important;',
+          'text-align: center !important;',
+          'display: flex !important;',
+          'align-items: center !important;',
+          'justify-content: center !important;',
+          'letter-spacing: 0.5px !important;',
+          'transition: all 0.2s ease !important;',
+          'user-select: none !important;',
+          'box-sizing: border-box !important;',
+          'background: linear-gradient(135deg, #00b05b 0%, #00ff88 100%) !important;',
+          'color: #081726 !important;',
+          'box-shadow: 0 0 10px rgba(0, 255, 136, 0.4) !important;',
+        ].join(' ');
+      };
+
       // 【每日挑战自动化】一键完成按钮 + 按钮下方状态提示 (v1.7.11)
       const dailyBtn = document.createElement('button');
       dailyBtn.id = 'snooker-daily-challenge-btn';
@@ -10784,23 +10364,8 @@
         this.dailyChallengeBtn.style.boxShadow = '0 0 10px rgba(0, 255, 136, 0.4)';
       };
 
-      dailyBtn.style.cssText = [
-        'width: 100% !important;',
-        'padding: 8px 10px !important;',
-        'margin: 2px 0 8px 0 !important;',
-        'border: none !important;',
-        'border-radius: 6px !important;',
-        'font-size: 12.5px !important;',
-        'font-weight: 700 !important;',
-        'cursor: pointer !important;',
-        'text-align: center !important;',
-        'display: flex !important;',
-        'align-items: center !important;',
-        'justify-content: center !important;',
-        'letter-spacing: 0.5px !important;',
-        'transition: all 0.2s ease !important;',
-        'user-select: none !important;',
-      ].join(' ');
+      stylePanelActionButton(dailyBtn, '2px 0 8px 0');
+      this.updateDailyChallengeBtn();
 
       dailyBtn.onclick = (e) => {
         e.stopPropagation();
@@ -10825,27 +10390,29 @@
       this.body.appendChild(dailyBtn);
       this.body.appendChild(dailyMsg);
 
+      // 一键全选/全不选，放在每日挑战按钮下方。
+      const allBtn = document.createElement('button');
+      allBtn.type = 'button';
+      allBtn.id = 'snooker-toggle-all-btn';
+      allBtn.title = '一键切换所有勾选项';
+      stylePanelActionButton(allBtn, '0 0 8px 0');
+      allBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      allBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.toggleAllFeatures();
+      };
+      this.allTogglesBtn = allBtn;
+      this.body.appendChild(allBtn);
+      this.updateToggleAllButton();
+
       // 【跳过本关】某关反复清不掉时，保留未完成并继续下一关（v1.7.11）
       const skipBtn = document.createElement('button');
       skipBtn.id = 'snooker-daily-skip-btn';
       skipBtn.type = 'button';
       skipBtn.textContent = '⏭️ 跳过当前关卡（保留未完成）';
-      skipBtn.style.cssText = [
-        'width: 100% !important;',
-        'padding: 6px 8px !important;',
-        'margin: -2px 0 8px 0 !important;',
-        'border: 1px solid rgba(255, 170, 60, 0.55) !important;',
-        'border-radius: 6px !important;',
-        'background: rgba(255, 170, 60, 0.14) !important;',
-        'color: #ffcf8a !important;',
-        'font-size: 11.5px !important;',
-        'font-weight: 600 !important;',
-        'cursor: pointer !important;',
-        'display: none !important;',
-        'align-items: center !important;',
-        'justify-content: center !important;',
-        'user-select: none !important;',
-      ].join(' ');
+      stylePanelActionButton(skipBtn, '0 0 8px 0');
+      setImp(skipBtn, 'display', 'none');
       skipBtn.onclick = (e) => {
         e.stopPropagation();
         e.preventDefault();
@@ -10859,122 +10426,6 @@
       this.dailySkipBtn = skipBtn;
       this.body.appendChild(skipBtn);
       this.updateDailyChallengeBtn();
-
-      // 【真实走位 vs 白色落位预测线】轨迹对比记录与导出按钮组 (v1.7.7)
-      const recordRow = document.createElement('div');
-      recordRow.id = 'snooker-trajectory-record-group';
-      recordRow.style.cssText = [
-        'display: grid !important;',
-        'grid-template-columns: 1fr 1fr !important;',
-        'gap: 6px !important;',
-        'margin: 0 0 8px 0 !important;',
-        'width: 100% !important;',
-        'box-sizing: border-box !important;',
-      ].join(' ');
-
-      const recordBtn = document.createElement('button');
-      recordBtn.id = 'snooker-record-toggle-btn';
-      recordBtn.type = 'button';
-      this.recordBtn = recordBtn;
-
-      const exportBtn = document.createElement('button');
-      exportBtn.id = 'snooker-record-export-btn';
-      exportBtn.type = 'button';
-      this.exportBtn = exportBtn;
-
-      recordBtn.style.cssText = [
-        'width: 100% !important;',
-        'padding: 7px 4px !important;',
-        'border: 1px solid rgba(0, 255, 136, 0.35) !important;',
-        'border-radius: 6px !important;',
-        'font-size: 11.5px !important;',
-        'font-weight: 700 !important;',
-        'cursor: pointer !important;',
-        'text-align: center !important;',
-        'display: flex !important;',
-        'align-items: center !important;',
-        'justify-content: center !important;',
-        'letter-spacing: 0.3px !important;',
-        'transition: all 0.2s ease !important;',
-        'user-select: none !important;',
-        'white-space: nowrap !important;',
-      ].join(' ');
-
-      exportBtn.style.cssText = [
-        'width: 100% !important;',
-        'padding: 7px 4px !important;',
-        'border: 1px solid rgba(134, 207, 255, 0.45) !important;',
-        'border-radius: 6px !important;',
-        'font-size: 11.5px !important;',
-        'font-weight: 700 !important;',
-        'cursor: pointer !important;',
-        'text-align: center !important;',
-        'display: flex !important;',
-        'align-items: center !important;',
-        'justify-content: center !important;',
-        'letter-spacing: 0.3px !important;',
-        'transition: all 0.2s ease !important;',
-        'user-select: none !important;',
-        'white-space: nowrap !important;',
-      ].join(' ');
-
-      this.updateRecordButtons = () => {
-        if (!this.recordBtn || !this.exportBtn) return;
-        const isRec = Boolean(typeof TrajectoryRecorder !== 'undefined' && TrajectoryRecorder.isRecording);
-        const count = (typeof TrajectoryRecorder !== 'undefined' && Array.isArray(TrajectoryRecorder.records))
-          ? TrajectoryRecorder.records.length
-          : 0;
-
-        if (isRec) {
-          this.recordBtn.textContent = count > 0 ? `⏹️ 停止记录 (${count}杆)` : '⏹️ 停止记录';
-          this.recordBtn.style.background = 'linear-gradient(135deg, #d32f2f 0%, #ff5252 100%)';
-          this.recordBtn.style.color = '#ffffff';
-          this.recordBtn.style.borderColor = 'rgba(255, 82, 82, 0.8)';
-          this.recordBtn.style.boxShadow = '0 0 10px rgba(255, 82, 82, 0.5)';
-        } else {
-          this.recordBtn.textContent = count > 0 ? `⏺️ 开始记录 (${count}杆)` : '⏺️ 开始记录';
-          this.recordBtn.style.background = 'linear-gradient(135deg, #1b382b 0%, #24523b 100%)';
-          this.recordBtn.style.color = '#7df7b0';
-          this.recordBtn.style.borderColor = 'rgba(0, 255, 136, 0.35)';
-          this.recordBtn.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.25)';
-        }
-
-        this.exportBtn.textContent = count > 0 ? `💾 导出记录 (${count}杆)` : '💾 导出记录';
-        if (count > 0) {
-          this.exportBtn.style.background = 'linear-gradient(135deg, #174266 0%, #1f649c 100%)';
-          this.exportBtn.style.color = '#d6f0ff';
-          this.exportBtn.style.borderColor = 'rgba(134, 207, 255, 0.6)';
-          this.exportBtn.style.boxShadow = '0 0 8px rgba(134, 207, 255, 0.35)';
-        } else {
-          this.exportBtn.style.background = 'rgba(25, 45, 65, 0.65)';
-          this.exportBtn.style.color = '#9bb0c4';
-          this.exportBtn.style.borderColor = 'rgba(134, 207, 255, 0.2)';
-          this.exportBtn.style.boxShadow = 'none';
-        }
-      };
-
-      recordBtn.onclick = (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        if (typeof TrajectoryRecorder !== 'undefined') {
-          TrajectoryRecorder.toggleRecording();
-        }
-        this.updateRecordButtons();
-      };
-
-      exportBtn.onclick = (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        if (typeof TrajectoryRecorder !== 'undefined') {
-          TrajectoryRecorder.exportRecords();
-        }
-        this.updateRecordButtons();
-      };
-
-      this.updateRecordButtons();
-      recordRow.appendChild(recordBtn);
-      recordRow.appendChild(exportBtn);
-      this.body.appendChild(recordRow);
 
       const row = (label, key) => {
         const div = document.createElement('label');
@@ -11046,36 +10497,6 @@
       row('出杆力度锁定', 'powerLockEnabled');
       row('调试信息', 'showDebug');
 
-      const allBtn = document.createElement('button');
-      allBtn.type = 'button';
-      allBtn.id = 'snooker-toggle-all-btn';
-      allBtn.title = '一键切换所有勾选项';
-      allBtn.style.cssText = [
-        'width: 100% !important;',
-        'margin: 7px 0 2px 0 !important;',
-        'padding: 5px 8px !important;',
-        'border: 1px solid rgba(0, 255, 136, 0.35) !important;',
-        'border-radius: 5px !important;',
-        'background: linear-gradient(135deg, #1b382b 0%, #24523b 100%) !important;',
-        'color: #7df7b0 !important;',
-        'font-size: 11.5px !important;',
-        'font-weight: 600 !important;',
-        'font-family: inherit !important;',
-        'cursor: pointer !important;',
-        'box-sizing: border-box !important;',
-        'pointer-events: auto !important;',
-        'user-select: none !important;',
-      ].join(' ');
-      allBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-      allBtn.onclick = (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        this.toggleAllFeatures();
-      };
-      this.allTogglesBtn = allBtn;
-      this.body.appendChild(allBtn);
-      this.updateToggleAllButton();
-
       const tipHint = document.createElement('div');
       tipHint.textContent = '💡 提示: 单指双击屏幕可隐藏/重新显示控制面板';
       tipHint.style.cssText = 'font-size: 11px !important; color: #a8b8a5 !important; margin: 3px 0 6px 0 !important;';
@@ -11117,6 +10538,19 @@
       if (!btn) return;
       const allOff = TOGGLE_KEYS.every((key) => !CONFIG[key]);
       btn.textContent = allOff ? '勾选所有功能' : '取消所有勾选';
+      // 勾选所有功能时沿用绿色模板；取消所有勾选时改为红色警示样式
+      const setImpStyle = (prop, value) => {
+        try { btn.style.setProperty(prop, value, 'important'); } catch (_) {}
+      };
+      if (allOff) {
+        setImpStyle('background', 'linear-gradient(135deg, #00b05b 0%, #00ff88 100%)');
+        setImpStyle('color', '#081726');
+        setImpStyle('box-shadow', '0 0 10px rgba(0, 255, 136, 0.4)');
+      } else {
+        setImpStyle('background', 'linear-gradient(135deg, #ff4d4f 0%, #ff7875 100%)');
+        setImpStyle('color', '#ffffff');
+        setImpStyle('box-shadow', '0 0 10px rgba(255, 77, 79, 0.5)');
+      }
     },
 
     toggleAllFeatures() {
@@ -11144,6 +10578,7 @@
       let activePointerId = null;
       let startX = 0, startY = 0;
       let panelStartLeft = 0, panelStartTop = 0;
+      let panelW = 0, panelH = 0;
       let pressTimer = null;
 
       // 展开状态下支持在控制面板界面直接上下滑动来查看完整内容（无需显式滚动条）
@@ -11160,36 +10595,42 @@
       }, true);
 
       this.panel.addEventListener('pointerdown', (e) => {
-        // 如果当前是展开状态：严禁拖拽移动面板！仅支持在面板界面直接滑动查看内容
-        if (!this.collapsed) {
-          // 允许收起按钮点击正常工作
-          if (this.toggleBtn && (e.target === this.toggleBtn || this.toggleBtn.contains(e.target))) {
-            return;
-          }
-          if (!this.body) return;
-          isPanelSwiping = true;
-          hasSwiped = false;
-          swipeStartY = e.clientY;
-          swipeStartScroll = this.body.scrollTop;
+        // 展开状态下允许收起按钮点击正常工作
+        if (!this.collapsed && this.toggleBtn && (e.target === this.toggleBtn || this.toggleBtn.contains(e.target))) {
           return;
         }
+        if (!this.body) return;
 
-        // 仅在收起为加号圆圈时：长按0.3秒才允许拖动圆圈位置！
         isPointerDown = true;
         isLongPressActive = false;
         didDrag = false;
         activePointerId = e.pointerId;
         startX = e.clientX;
         startY = e.clientY;
+        // 按下期间暂时禁用原生滚动手势，保证长按拖动不被指针取消打断
+        this.panel.style.touchAction = 'none';
 
         const rect = this.panel.getBoundingClientRect();
         panelStartLeft = rect.left;
         panelStartTop = rect.top;
+        panelW = rect.width || this._circleSize;
+        panelH = rect.height || this._circleSize;
 
+        if (!this.collapsed) {
+          // 展开状态下：未进入长按前，移动仍按上下滑动浏览内容处理
+          isPanelSwiping = true;
+          hasSwiped = false;
+          swipeStartY = e.clientY;
+          swipeStartScroll = this.body.scrollTop;
+        }
+
+        // 收起（圆圈加号）与展开状态：长按0.3秒均可拖动面板位置
         clearTimeout(pressTimer);
         pressTimer = setTimeout(() => {
           pressTimer = null;
           isLongPressActive = true;
+          isPanelSwiping = false;
+          hasSwiped = false;
           try {
             if (activePointerId != null && this.panel.setPointerCapture) {
               this.panel.setPointerCapture(activePointerId);
@@ -11201,26 +10642,24 @@
       });
 
       window.addEventListener('pointermove', (e) => {
-        // 1. 展开状态下：用户直接在面板界面上下滑动浏览内容
-        if (isPanelSwiping && this.body && !this.collapsed) {
-          const dy = e.clientY - swipeStartY;
-          if (Math.abs(dy) > 3) {
-            hasSwiped = true;
-            this.body.scrollTop = swipeStartScroll - dy;
-          }
-          return;
-        }
-
-        // 2. 收起状态下：长按加号圆圈后的拖动移动
-        if (!isPointerDown || !this.collapsed) return;
+        if (!isPointerDown) return;
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
         const dist = Math.hypot(dx, dy);
 
         if (!isLongPressActive) {
+          // 移动超过阈值则取消长按拖动计时
           if (dist > 8 && pressTimer) {
             clearTimeout(pressTimer);
             pressTimer = null;
+          }
+          // 展开状态下：未进入长按前，直接上下滑动浏览内容
+          if (!this.collapsed && isPanelSwiping && this.body) {
+            const swipeDy = e.clientY - swipeStartY;
+            if (Math.abs(swipeDy) > 3) {
+              hasSwiped = true;
+              this.body.scrollTop = swipeStartScroll - swipeDy;
+            }
           }
           return;
         }
@@ -11231,11 +10670,9 @@
         const vv = window.visualViewport;
         const winW = (vv && vv.width) || window.innerWidth || document.documentElement.clientWidth || 800;
         const winH = (vv && vv.height) || window.innerHeight || document.documentElement.clientHeight || 600;
-        const pW = 21;
-        const pH = 21;
 
-        const newLeft = clamp(panelStartLeft + dx, 0, Math.max(0, winW - pW));
-        const newTop = clamp(panelStartTop + dy, 0, Math.max(0, winH - pH));
+        const newLeft = clamp(panelStartLeft + dx, 0, Math.max(0, winW - panelW));
+        const newTop = clamp(panelStartTop + dy, 0, Math.max(0, winH - panelH));
 
         this.panel.style.left = newLeft + 'px';
         this.panel.style.top = newTop + 'px';
@@ -11244,17 +10681,6 @@
       });
 
       const onPointerUp = (e) => {
-        // 处理直接滑动结束
-        if (isPanelSwiping) {
-          if (hasSwiped) {
-            // 滑动过，阻止触发随后的点击事件（防止滑动时光标/手指松开误触复选框或按钮）
-            this._suppressClickUntil = performance.now() + 200;
-          }
-          isPanelSwiping = false;
-          hasSwiped = false;
-        }
-
-        // 处理圆圈拖动结束
         if (!isPointerDown) return;
         isPointerDown = false;
         clearTimeout(pressTimer);
@@ -11267,7 +10693,11 @@
         } catch (_) {}
         activePointerId = null;
 
+        // 恢复展开状态的原生滚动手势，收起状态继续保持禁用
+        this.panel.style.touchAction = this.collapsed ? 'none' : 'pan-y';
+
         if (isLongPressActive) {
+          // 长按拖动结束：保存位置并抑制随后的点击
           this.setDragVisual(false);
           this._suppressClickUntil = performance.now() + 350;
           if (didDrag) {
@@ -11278,11 +10708,24 @@
           }
           isLongPressActive = false;
           didDrag = false;
-        } else {
-          if (this.collapsed) {
-            e.stopPropagation();
-            this.handlePlusClick();
+          isPanelSwiping = false;
+          hasSwiped = false;
+          return;
+        }
+
+        // 处理直接滑动结束
+        if (isPanelSwiping) {
+          if (hasSwiped) {
+            // 滑动过，阻止触发随后的点击事件（防止滑动时光标/手指松开误触复选框或按钮）
+            this._suppressClickUntil = performance.now() + 200;
           }
+          isPanelSwiping = false;
+          hasSwiped = false;
+        }
+
+        if (this.collapsed) {
+          e.stopPropagation();
+          this.handlePlusClick();
         }
       };
 
@@ -11307,6 +10750,7 @@
       }
 
       if (c) {
+        const circleSize = this._circleSize;
         if (this.body) this.body.style.display = 'none';
         if (this.titleBoxEl) this.titleBoxEl.style.display = 'none';
         if (this.titleEl) this.titleEl.style.display = 'none';
@@ -11315,8 +10759,8 @@
             'display: flex !important;',
             'align-items: center !important;',
             'justify-content: center !important;',
-            'width: 21px !important;',
-            'height: 21px !important;',
+            'width: ' + circleSize + 'px !important;',
+            'height: ' + circleSize + 'px !important;',
             'padding: 0 !important;',
             'margin: 0 !important;',
             'cursor: pointer !important;',
@@ -11331,10 +10775,10 @@
             'display: inline-flex !important;',
             'align-items: center !important;',
             'justify-content: center !important;',
-            'width: 21px !important;',
-            'height: 21px !important;',
+            'width: ' + circleSize + 'px !important;',
+            'height: ' + circleSize + 'px !important;',
             'color: #173121 !important;',
-            'font-size: 14px !important;',
+            'font-size: ' + (circleSize * 2 / 3) + 'px !important;',
             'font-weight: 700 !important;',
             'line-height: 1 !important;',
             'cursor: pointer !important;',
@@ -11343,12 +10787,12 @@
         }
         if (this.panel) {
           this.panel.style.display = 'block';
-          this.panel.style.width = '21px';
-          this.panel.style.minWidth = '21px';
-          this.panel.style.maxWidth = '21px';
-          this.panel.style.height = '21px';
-          this.panel.style.minHeight = '21px';
-          this.panel.style.maxHeight = '21px';
+          this.panel.style.width = circleSize + 'px';
+          this.panel.style.minWidth = circleSize + 'px';
+          this.panel.style.maxWidth = circleSize + 'px';
+          this.panel.style.height = circleSize + 'px';
+          this.panel.style.minHeight = circleSize + 'px';
+          this.panel.style.maxHeight = circleSize + 'px';
           this.panel.style.padding = '0';
           this.panel.style.borderRadius = '50%';
           this.panel.style.background = '#d8c694';
@@ -11471,19 +10915,7 @@
       }
       const roomLine = (pred && pred.roomMode && pred.roomMode.label) ? `模式: ${pred.roomMode.label}\n` : '';
       const engLine = `仿真: ${engineSim.status === 'ready' ? `就绪 (${engineSim.simMs}ms/${engineSim.frames}帧)` : (engineSim.status === 'loading' ? '加载中...' : '备轨/未启用')}\n`;
-      let recLine = '';
-      if (typeof TrajectoryRecorder !== 'undefined') {
-        const isRec = TrajectoryRecorder.isRecording;
-        const count = TrajectoryRecorder.records.length;
-        if (isRec) {
-          recLine = `\n[🔴 录制中] 已录 ${count} 杆`;
-        } else if (count > 0) {
-          const last = TrajectoryRecorder.records[count - 1];
-          const err = last.comparisonMetrics?.finalRestErrorMm;
-          recLine = `\n[已录 ${count} 杆] 上杆误差: ${err != null ? err.toFixed(1) + 'mm' : '-'}`;
-        }
-      }
-      return `${roomLine}${powerLine}\n${engLine}投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}${recLine}`;
+      return `${roomLine}${powerLine}\n${engLine}投影: ${d.source}${CONFIG.flatOnCloth ? '(3D贴台)' : ''}\n预测: ${predSrc}\n活跃球: ${d.balls}\n目标: ${d.target}\n袋口: ${d.pocket}\n状态: ${ready ? '就绪' : '未就绪'}\n运行帧: ${frameTag}`;
     },
 
     updateDebug(pred, ready, customStatus) {
@@ -11630,9 +11062,6 @@
         hudPill.hide();
         hudPill.destroy();
         cleanAllOrphanHudPills(false);
-        if (typeof TrajectoryRecorder !== 'undefined' && TrajectoryRecorder.activeSession) {
-          TrajectoryRecorder.activeSession = null;
-        }
 
         _lastGeomKey = null;
         _lastGeomPred = null;
@@ -11749,9 +11178,6 @@
             ? retainedPower
             : (Number.isFinite(fallbackShotPower) && fallbackShotPower > 2 ? fallbackShotPower : null);
           if (gatePower != null) _lastShotPowerForTurn = clamp(gatePower, 0, 100);
-          if (typeof TrajectoryRecorder !== 'undefined') {
-            TrajectoryRecorder.onShotStart(state, _retainedShotPred || retainedSource);
-          }
         }
         if (!_shotHiddenSince) _shotHiddenSince = performance.now();
         const now = performance.now();
@@ -11762,9 +11188,6 @@
         const shotGraceActive = _shotHiddenSince > 0 && (now - _shotHiddenSince) < 120;
 
         if (still && !shotGraceActive) {
-          if (typeof TrajectoryRecorder !== 'undefined') {
-            TrajectoryRecorder.onShotEnd(state);
-          }
           // v1.9.13：全台完全停球即结束本轮快照生命周期。
           // 上一版的“目标球吃库线保留到下一杆”会让蓝色虚影停在台面，
           // 与母球吃库线同色时尤其容易被看成未清除；现在统一丢弃全部冻结线，
@@ -11790,9 +11213,6 @@
           // 只要有任何球（尤其是母球）还在运动，强制保持锁定！
           _shotMotionLocked = true;
           if (autoRecover) {
-            if (typeof TrajectoryRecorder !== 'undefined') {
-              TrajectoryRecorder.onShotEnd(state);
-            }
             _shotMotionLocked = false;
             _wasInShot = false;
             _lastShotPred = null;
@@ -11806,9 +11226,6 @@
             resetShotPowerFallbacks();
             powerLock.endAutoShotBypass();
           } else if (!forceShow) {
-            if (typeof TrajectoryRecorder !== 'undefined') {
-              TrajectoryRecorder.onFrame(state);
-            }
             // v1.9.10：白线/绿线继续实时擦除；母球吃库线与落位线整条保留；
             // 目标球吃库反弹线只画冻结快照。
             const predToDraw = _retainedShotPred || _lastShotPred || _lastCueCushionPred || _lastFullPred;
@@ -11854,9 +11271,6 @@
         }
       } else {
         if (_wasInShot) {
-          if (typeof TrajectoryRecorder !== 'undefined') {
-            TrajectoryRecorder.onShotEnd(state);
-          }
           _wasInShot = false;
           _shotMotionLocked = false;
           _lastShotPred = null;
@@ -12111,7 +11525,6 @@
       buildShotSnapshotPrediction,
       simulateCueArrivalAtContact,
       resolveTargetBallImpactState,
-      TrajectoryRecorder,
       hudPill,
       overlay,
       projection,
