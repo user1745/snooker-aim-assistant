@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.22
+// @version      1.9.23
 // @description  母球落位预测精度深度升级(整合snk-core同源内核live物理参数直连/core.getPower与core.getTip输入对齐及0.5圆盘截断/消除仰角残留/同步影子仿真直出零人为截断/二次碰球尾段续接/空台多库引擎全行程/出杆瞬间as-struck复核)、目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -25,7 +25,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.22';
+  const SCRIPT_VERSION = '1.9.23';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -2209,6 +2209,18 @@
   let _powerLockUi = null;
   const _powerLockPatchedCores = new WeakSet();
 
+  // 每日挑战自动化是否处于进行中（进行中强制隐藏力度锁定滑条）
+  function isDailyChallengeAutoActive() {
+    try {
+      if (typeof DailyChallengeEngine !== 'undefined' && DailyChallengeEngine && DailyChallengeEngine.running) return true;
+      if (typeof DailyRunner !== 'undefined' && DailyRunner) {
+        const phase = DailyRunner.phase;
+        if (phase === 'playing' || phase === 'claiming' || phase === 'advancing') return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   const powerLock = {
     enabled: Boolean(CONFIG.powerLockEnabled),
     value: POWER_LOCK_DEFAULT_VALUE,
@@ -2375,9 +2387,10 @@
     updateVisibility(visible) {
       // 跨窗口/跨标签页时 CONFIG 可能已被其它实例更新，这里每帧同步开关状态。
       this.enabled = Boolean(CONFIG.powerLockEnabled);
-      // 大厅主界面强制不显示力度锁定滑条（即使面板中已勾选）
+      // 大厅主界面与每日挑战自动化进行中强制不显示力度锁定滑条（即使面板中已勾选）
       const lobbyHome = typeof isLobbyHomeScreen === 'function' ? isLobbyHomeScreen() : false;
-      this.isTableVisible = Boolean(visible) && !lobbyHome;
+      const dailyActive = typeof isDailyChallengeAutoActive === 'function' ? isDailyChallengeAutoActive() : false;
+      this.isTableVisible = Boolean(visible) && !lobbyHome && !dailyActive;
       if (!this.enabled || !this.isTableVisible) {
         if (_powerLockUi && _powerLockUi.root) _powerLockUi.root.style.display = 'none';
         return;
@@ -3855,6 +3868,7 @@
 
   const DAILY_ENTRY_KEY = 'snooker.daily.entry.v1';
   const DAILY_RUN_KEY = 'snooker.daily.run.v1';
+  const DAILY_COLLAPSE_KEY = 'snooker.daily.autoCollapse.v1';
   const DAILY_HOME_URL = 'https://147master.cn/';
 
   function dailyDelay(ms) {
@@ -3898,6 +3912,27 @@
     const s = dailySession();
     if (!s) return;
     try { s.removeItem(DAILY_ENTRY_KEY); } catch (_) {}
+  }
+
+  // 点击“开始自动化完成每日挑战”后，成功进入挑战房时自动收起控制面板。
+  // 用 sessionStorage 记录，确保跳转/刷新后仍能触发一次。
+  function requestDailyAutoCollapse() {
+    const s = dailySession();
+    if (!s) return;
+    try { s.setItem(DAILY_COLLAPSE_KEY, String(Date.now())); } catch (_) {}
+  }
+
+  function consumeDailyAutoCollapse() {
+    const s = dailySession();
+    if (!s) return false;
+    try {
+      const ts = Number(s.getItem(DAILY_COLLAPSE_KEY));
+      s.removeItem(DAILY_COLLAPSE_KEY);
+      // 10 分钟内有效，避免用户放弃启动后很久才手动进房时误收起面板
+      return Number.isFinite(ts) && ts > 0 && Date.now() - ts <= 10 * 60 * 1000;
+    } catch (_) {
+      return false;
+    }
   }
 
   function readDailyRunState() {
@@ -4271,6 +4306,10 @@
           this.startedAt = 0;
           this.clearAt = 0;
           this.save();
+          // 已在挑战房：点击启动后立即收起控制面板
+          try {
+            if (typeof ui !== 'undefined' && ui && typeof ui.setCollapsed === 'function') ui.setCollapsed(true);
+          } catch (_) {}
           this.notify('▶️ 已在「' + rname + '」挑战房，继续自动击球（进度 ' + claimed + '/' + total + '）', 'info', 4500);
           this.updatePanel();
           return { ok: true, inRoom: room.id, claimed, total };
@@ -4308,6 +4347,8 @@
         this.notify('🚀 已开始自动完成每日挑战：当前 ' + claimed + '/' + total + '，剩余 ' + (total - claimed) + ' 关，正在进入「' + nname + '」', 'success', 5200);
         this.updatePanel();
         devLog('info', '[每日挑战] 面板一键启动，下一关', next.id);
+        // 进入挑战房成功后自动收起控制面板（跨跳转/刷新仍有效）
+        requestDailyAutoCollapse();
 
         if (!/^\/$/.test(location.pathname)) {
           if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
@@ -4362,6 +4403,14 @@
       this.lastCtx = ctx || {};
       const room = detectDailyChallengeRoom();
       if (room) {
+        // 点击“开始自动化完成每日挑战”后，成功进入挑战房 → 自动收起控制面板
+        if (consumeDailyAutoCollapse()) {
+          try {
+            if (typeof ui !== 'undefined' && ui && typeof ui.setCollapsed === 'function') {
+              ui.setCollapsed(true);
+            }
+          } catch (_) {}
+        }
         const sameRoom = this.currentId === room.id;
         if (!sameRoom) {
           this._retries = 0;
@@ -8485,6 +8534,9 @@
   let _cueCushionCompleted = false;
   let _cueCushionEngaged = false;
   let _cueCushionMaxTravel = 0;
+  let _cuePostCompleted = false;
+  let _cuePostEngaged = false;
+  let _cuePostMaxTravel = 0;
   let _lastCueCushionPred = null;
   let _trackedTargetBallId = null;
   let _trackedTargetPos = null;
@@ -8494,6 +8546,9 @@
     _cueCushionCompleted = false;
     _cueCushionEngaged = false;
     _cueCushionMaxTravel = 0;
+    _cuePostCompleted = false;
+    _cuePostEngaged = false;
+    _cuePostMaxTravel = 0;
   }
 
   function resetTargetMotionState() {
@@ -8658,6 +8713,82 @@
     }
 
     // 从母球实时位置开始保留尚未走过的折线，形成白线/绿线同款单向吞噬。
+    const trimmed = [{ x: liveCuePos.x, y: liveCuePos.y }];
+    for (let i = bestSegmentIdx + 1; i < originalPath.length; i++) {
+      trimmed.push({ x: originalPath[i].x, y: originalPath[i].y });
+    }
+    return trimmed.length >= 2 ? trimmed : null;
+  }
+
+  /**
+   * 母球落位预测线（碰后白线）动态擦除：
+   * 母球尚未碰球/远离预测路径时保持全长；
+   * 进入预测路径后起点跟随母球实时位置，已走过的后方路径被擦除；
+   * 母球到达路径终点或明显偏离预测路径时整条彻底消失。
+   */
+  function trimCuePostPathFromLive(originalPath, liveCuePos, impacted) {
+    if (!Array.isArray(originalPath) || originalPath.length < 2) return null;
+    if (_cuePostCompleted) return null;
+    if (!liveCuePos) return originalPath;
+
+    const startPt = originalPath[0];
+    const endPt = originalPath[originalPath.length - 1];
+
+    if (!_cuePostEngaged) {
+      const distToStart = Math.hypot(liveCuePos.x - startPt.x, liveCuePos.y - startPt.y);
+      // 已碰球（目标准确移动）或母球已接近路径起点，进入擦除阶段
+      if (distToStart > 35 && !impacted) return originalPath;
+      _cuePostEngaged = true;
+      _cuePostMaxTravel = 0;
+    }
+
+    let bestSegmentIdx = -1;
+    let bestDistSq = Infinity;
+    let accumulatedLen = 0;
+    let projTravel = 0;
+
+    for (let i = 0; i < originalPath.length - 1; i++) {
+      const p1 = originalPath[i];
+      const p2 = originalPath[i + 1];
+      const segDx = p2.x - p1.x;
+      const segDy = p2.y - p1.y;
+      const segLen = Math.hypot(segDx, segDy);
+      if (segLen < 1e-4) continue;
+
+      let t = ((liveCuePos.x - p1.x) * segDx + (liveCuePos.y - p1.y) * segDy) / (segLen * segLen);
+      t = clamp(t, 0, 1);
+      const projX = p1.x + t * segDx;
+      const projY = p1.y + t * segDy;
+      const dSq = (liveCuePos.x - projX) ** 2 + (liveCuePos.y - projY) ** 2;
+
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestSegmentIdx = i;
+        projTravel = accumulatedLen + t * segLen;
+      }
+      accumulatedLen += segLen;
+    }
+
+    if (projTravel > _cuePostMaxTravel) _cuePostMaxTravel = projTravel;
+
+    // 母球到达（或越过）预测路径终点：整条消失
+    if (Math.hypot(liveCuePos.x - endPt.x, liveCuePos.y - endPt.y) <= 30 ||
+        accumulatedLen - projTravel <= 20) {
+      _cuePostCompleted = true;
+      return null;
+    }
+
+    if (bestSegmentIdx < 0) return originalPath;
+
+    // 明显偏离预测路径：直接终结，避免残线
+    if (bestDistSq > 70 * 70 && projTravel > 20) {
+      _cuePostCompleted = true;
+      return null;
+    }
+
+    if (projTravel <= 5) return originalPath;
+
+    // 从母球实时位置开始保留尚未走过的路径，形成与绿色瞄准线一致的单向吞噬
     const trimmed = [{ x: liveCuePos.x, y: liveCuePos.y }];
     for (let i = bestSegmentIdx + 1; i < originalPath.length; i++) {
       trimmed.push({ x: originalPath[i].x, y: originalPath[i].y });
@@ -9527,6 +9658,9 @@
         _cueCushionCompleted = false;
         _cueCushionEngaged = false;
         _cueCushionMaxTravel = 0;
+        _cuePostCompleted = false;
+        _cuePostEngaged = false;
+        _cuePostMaxTravel = 0;
         _trackedTargetBallId = null;
         _trackedTargetPos = null;
       }
@@ -9807,30 +9941,51 @@
         }
       }
 
-      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】(低杆回缩、跟杆、偏塞加塞弧线，出杆运动期间整条保留，停球后不再保留)
-      if (lineOptions.liveCuePost && CONFIG.showCuePostTrajectory && Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2) {
-        const cuePostProj = this.projectPolyline(pred.cuePostTrajectory, cueWorld);
-        if (cuePostProj.segments.length > 0) {
-          hasProjected = true;
-          ctx.save();
-          this.clipToTable(ctx, pred.tableBounds);
-          ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || CONFIG.cueLineColor || 'rgba(255, 255, 255, 0.95)';
-          ctx.lineWidth = CONFIG.cuePostTrajectoryWidthPx || 1.6;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          ctx.setLineDash([]);
-          ctx.beginPath();
-          for (const seg of cuePostProj.segments) {
-            ctx.moveTo(seg[0].x, seg[0].y);
-            ctx.lineTo(seg[1].x, seg[1].y);
-            drawnSegments.push(seg);
+      // 3.3) 【物理引擎母球真实碰后走位弧线与多库反弹】
+      // 白色落位预测线出杆后与绿色瞄准线一致：随母球实时位置单向擦除，走完即彻底消失。
+      if (lineOptions.liveCuePost && CONFIG.showCuePostTrajectory) {
+        let cuePostPath = Array.isArray(pred.cuePostTrajectory) && pred.cuePostTrajectory.length >= 2
+          ? pred.cuePostTrajectory
+          : null;
+        let cuePostTailPath = Array.isArray(pred.cuePostTailTrajectory) && pred.cuePostTailTrajectory.length >= 2
+          ? pred.cuePostTailTrajectory
+          : null;
+
+        if (inMotion && cuePostPath) {
+          const targetMoved = Boolean(
+            liveTargetPos && t && t.ball && t.ball.pos &&
+            Math.hypot(liveTargetPos.x - t.ball.pos.x, liveTargetPos.y - t.ball.pos.y) > 2
+          );
+          // 尾段并入主路径统一擦除，避免二次碰球尾段残留
+          const fullPath = cuePostTailPath ? cuePostPath.concat(cuePostTailPath) : cuePostPath;
+          cuePostPath = trimCuePostPathFromLive(fullPath, liveCuePos, targetMoved);
+          cuePostTailPath = null;
+        }
+
+        if (cuePostPath) {
+          const cuePostProj = this.projectPolyline(cuePostPath, cueWorld);
+          if (cuePostProj.segments.length > 0) {
+            hasProjected = true;
+            ctx.save();
+            this.clipToTable(ctx, pred.tableBounds);
+            ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || CONFIG.cueLineColor || 'rgba(255, 255, 255, 0.95)';
+            ctx.lineWidth = CONFIG.cuePostTrajectoryWidthPx || 1.6;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            for (const seg of cuePostProj.segments) {
+              ctx.moveTo(seg[0].x, seg[0].y);
+              ctx.lineTo(seg[1].x, seg[1].y);
+              drawnSegments.push(seg);
+            }
+            ctx.stroke();
+            ctx.restore();
           }
-          ctx.stroke();
-          ctx.restore();
         }
         // v1.9.17：二次碰球后的引擎续接尾段（稍淡区分主段与二次碰球后走势）
-        if (Array.isArray(pred.cuePostTailTrajectory) && pred.cuePostTailTrajectory.length >= 2) {
-          const tailProj = this.projectPolyline(pred.cuePostTailTrajectory, cueWorld);
+        if (cuePostTailPath) {
+          const tailProj = this.projectPolyline(cuePostTailPath, cueWorld);
           if (tailProj.segments.length > 0) {
             hasProjected = true;
             ctx.save();
@@ -11084,14 +11239,15 @@
       const isPlayable = isPlayableTableState(rawState);
       // 大厅主界面 DOM 判定优先级最高，即使残留对局状态也强制按大厅处理
       const lobbyHome = isLobbyHomeScreen();
+      const dailyAutoActive = isDailyChallengeAutoActive();
       const inLobby = lobbyHome ? true : (isPlayable ? false : isLobbyMenuVisible());
       const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
       const inLobbyOrSettlementOrLoading = inLobby || isSettlement || isLoading;
 
-      // 力度锁定滑动条只跟随开关显示；大厅主界面强制隐藏；跨 iframe 时由面板所在窗口统一显示。
+      // 力度锁定滑动条只跟随开关显示；大厅主界面与每日挑战自动化进行中强制隐藏。
       try {
-        powerLock.updateVisibility(!lobbyHome);
+        powerLock.updateVisibility(!lobbyHome && !dailyAutoActive);
       } catch (_) {}
 
       // 【每日挑战全自动 v1.7.11】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
@@ -11305,12 +11461,12 @@
                   // 不随母球位置裁剪；停球后统一清除。
                   frozenCueCushionPath: _retainedCueCushionPath,
                   frozenCueCushionBounds: _retainedCueCushionBounds,
-                  liveTargetRebound: false,
+                  liveTargetRebound: true,
                   liveCuePost: true,
                   retainedWhite: false,
                   retainedGreen: false,
                   retainedCueCushion: false,
-                  retainedTargetRebound: true,
+                  retainedTargetRebound: false,
                   retainedCuePost: false,
                 }
               );
@@ -11410,7 +11566,7 @@
           retainedWhite: false,
           retainedGreen: false,
           retainedCueCushion: false,
-          retainedTargetRebound: true,
+          retainedTargetRebound: false,
           retainedCuePost: false,
         }
       );
