@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.21
+// @version      1.9.22
 // @description  母球落位预测精度深度升级(整合snk-core同源内核live物理参数直连/core.getPower与core.getTip输入对齐及0.5圆盘截断/消除仰角残留/同步影子仿真直出零人为截断/二次碰球尾段续接/空台多库引擎全行程/出杆瞬间as-struck复核)、目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
@@ -25,7 +25,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.21';
+  const SCRIPT_VERSION = '1.9.22';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -1543,6 +1543,8 @@
   let _settleCheckTime = 0;
   let _loadingCheckCache = false;
   let _loadingCheckTime = 0;
+  let _lobbyHomeCheckCache = false;
+  let _lobbyHomeCheckTime = 0;
 
   function hasVisibleLobbyUiInDoc(doc) {
     if (!doc || !doc.body) return false;
@@ -1803,10 +1805,58 @@
       }
       _lobbyCheckCache = detected;
     }
-    return _lobbyCheckCache;
+    return _lobbyCheckCache || isLobbyHomeScreen();
+  }
+
+  /**
+   * 大厅主界面专属判定（DOM 结构，最可靠）：
+   * #app > section#product-lobby-home.home 可见，且 .mode-nav 下正好有 3 个 data-game 按钮。
+   * 同时排除游戏路由 iframe 与 threeGame，避免大厅壳层和实际对局页混淆。
+   */
+  function isLobbyHomeScreen() {
+    const now = performance.now();
+    if (now - _lobbyHomeCheckTime < 200) return _lobbyHomeCheckCache;
+    _lobbyHomeCheckTime = now;
+
+    const checkDoc = (doc, win) => {
+      try {
+        if (!doc || !doc.body) return false;
+        const app = doc.getElementById('app');
+        const home = doc.querySelector('#app > section#product-lobby-home.home');
+        if (!app || !home) return false;
+        if (home.getClientRects().length === 0) return false;
+        const modes = doc.querySelectorAll('#product-lobby-home .mode-nav button[data-game]');
+        if (modes.length !== 3) return false;
+        const games = [];
+        for (let i = 0; i < modes.length; i++) games.push(String(modes[i].getAttribute('data-game')));
+        if (games.indexOf('0') < 0 || games.indexOf('1') < 0 || games.indexOf('2') < 0) return false;
+        if (doc.getElementById('product-route-frame')) return false;
+        if (win && win.threeGame) return false;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    let detected = checkDoc(document, window);
+    if (!detected) {
+      try {
+        if (window.top && window.top !== window && window.top.document) {
+          detected = checkDoc(window.top.document, window.top);
+        }
+      } catch (_) {}
+    }
+    _lobbyHomeCheckCache = detected;
+    return detected;
   }
 
   function isLobbyOrNonTableScreen(state) {
+    // 大厅主界面 DOM 判定优先级最高：即使存在残留对局状态也必须视为非台面
+    if (isLobbyHomeScreen()) {
+      if (overlay && overlay.canvas) overlay.clear();
+      if (typeof hudPill !== 'undefined') hudPill.hide();
+      return true;
+    }
     if (_shotMotionLocked) return false;
     // 0. 可玩台面状态具有最高通行权
     if (isPlayableTableState(state)) {
@@ -2325,14 +2375,16 @@
     updateVisibility(visible) {
       // 跨窗口/跨标签页时 CONFIG 可能已被其它实例更新，这里每帧同步开关状态。
       this.enabled = Boolean(CONFIG.powerLockEnabled);
-      this.isTableVisible = Boolean(visible);
-      if (!this.enabled) {
+      // 大厅主界面强制不显示力度锁定滑条（即使面板中已勾选）
+      const lobbyHome = typeof isLobbyHomeScreen === 'function' ? isLobbyHomeScreen() : false;
+      this.isTableVisible = Boolean(visible) && !lobbyHome;
+      if (!this.enabled || !this.isTableVisible) {
         if (_powerLockUi && _powerLockUi.root) _powerLockUi.root.style.display = 'none';
         return;
       }
       this.ensureUI();
       if (!_powerLockUi || !_powerLockUi.root) return;
-      _powerLockUi.root.style.display = this.isTableVisible ? 'flex' : 'none';
+      _powerLockUi.root.style.display = 'flex';
     },
 
     getTargetDoc() {
@@ -8364,6 +8416,11 @@
     },
 
     show(text, accentColor) {
+      // 大厅主界面绝不显示信息浮标
+      if (typeof isLobbyHomeScreen === 'function' && isLobbyHomeScreen()) {
+        this.hide();
+        return;
+      }
       if (!CONFIG.showHudPill || !text) {
         this.hide();
         return;
@@ -11025,20 +11082,22 @@
       const hasCanvas = Boolean(projection.canvas && isCanvasActuallyVisible(projection.canvas));
       const rawState = hasCanvas ? extractRawState() : null;
       const isPlayable = isPlayableTableState(rawState);
-      const inLobby = isPlayable ? false : isLobbyMenuVisible();
+      // 大厅主界面 DOM 判定优先级最高，即使残留对局状态也强制按大厅处理
+      const lobbyHome = isLobbyHomeScreen();
+      const inLobby = lobbyHome ? true : (isPlayable ? false : isLobbyMenuVisible());
       const isSettlement = (inLobby || isPlayable) ? false : isSettlementOrGameOverScreen(rawState);
       const isLoading = (inLobby || isPlayable || isSettlement) ? false : isLoadingScreen(rawState);
-      const inLobbyOrSettlementOrLoading = isPlayable ? false : (inLobby || isSettlement || isLoading);
+      const inLobbyOrSettlementOrLoading = inLobby || isSettlement || isLoading;
 
-      // 力度锁定滑动条只跟随开关显示；跨 iframe 时由面板所在窗口统一显示。
+      // 力度锁定滑动条只跟随开关显示；大厅主界面强制隐藏；跨 iframe 时由面板所在窗口统一显示。
       try {
-        powerLock.updateVisibility(true);
+        powerLock.updateVisibility(!lobbyHome);
       } catch (_) {}
 
       // 【每日挑战全自动 v1.7.11】每帧驱动：进房免点击开局 / 清台领取 / 状态机推进
       try {
         if (typeof DailyRunner !== 'undefined' && DailyRunner) {
-          DailyRunner.tick(rawState, { isPlayable, inLobby, isSettlement, isLoading, hasCanvas });
+          DailyRunner.tick(rawState, { isPlayable: isPlayable && !lobbyHome, inLobby, isSettlement, isLoading, hasCanvas });
         }
       } catch (err) {
         devLog('warn', '[每日挑战] tick 异常', err);
@@ -11055,7 +11114,7 @@
 
       const state = (hasCanvas && (!inLobbyOrSettlementOrLoading || _shotMotionLocked)) ? rawState : null;
 
-      if ((!hasCanvas || !state || inLobbyOrSettlementOrLoading) && !_shotMotionLocked) {
+      if ((!hasCanvas || !state || inLobbyOrSettlementOrLoading) && (!_shotMotionLocked || lobbyHome)) {
         _nonTableFrames++;
         if (overlay.canvas) {
           overlay.clear();
