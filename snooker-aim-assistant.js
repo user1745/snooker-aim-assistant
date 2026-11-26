@@ -7,6 +7,8 @@
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
 // @run-at       document-start
+// @updateURL    https://cdn.jsdelivr.net/gh/user1745/snooker-aim-assistant@latest/snooker-aim-assistant.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/user1745/snooker-aim-assistant@latest/snooker-aim-assistant.user.js
 // @grant        none
 // ==/UserScript==
 
