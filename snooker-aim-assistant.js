@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斯诺克大师 · 高级瞄准与走位辅助线
 // @namespace    snooker-aim-assistant
-// @version      1.9.16
-// @description  目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs白色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
+// @version      1.9.17
+// @description  母球落位预测精度深度升级(整合snk-core同源内核live物理参数直连/core.getPower与core.getTip输入对齐及0.5圆盘截断/消除仰角残留/同步影子仿真直出零人为截断/二次碰球尾段续接/空台多库引擎全行程/出杆瞬间as-struck复核)、目标球吃库反弹折线改为随当前力度动态伸缩(终点=该力度下的真实停点，与母球吃库蓝线同一观感口径/按力度行程预算截断)、在 147master.cn 整合原生V3物理引擎，提供笔直瞄准延长线、官方微物理引擎母球走位预测弧线(拉杆/跟杆/划弧)、吃库反弹线、真实物理走位vs白色落位预测线录制与导出对比系统(控制面板一键启停录制/毫秒级高频采样击打目标球后实际走位轨迹/多维度量化落位与离线误差分析/JSON格式化导出)、母球碰后走位预测引擎重大精度升级(修复微模拟器连续接触提早截断母球走位Bug/0ms瞬时动力学模型重构/切角能量守恒与薄球切向动能无损保留/低杆逆旋强滑移反推模型/四库级连续弹性反弹)、控制面板展开交互核心重构(彻底修复电脑端Chrome浏览器单击加号圆圈时pointerup与click双重竞态瞬间相互抵消导致点击无反应Bug/全端手势防抖锁)、信息浮标原生DOM单层悬浮胶囊(彻底消除Canvas影子重影与跨窗口/Iframe残留遮挡Bug，离开球桌/对局结束/大厅/结算即刻物理销毁，跨文档穿透单例守护确保新对局浮标绝不被旧浮标重叠遮挡)、两阶段独立动态擦除算法(出杆母球飞行阶段白线平滑吞噬/绿线100%完整保留；撞击后绿线平滑吞噬；基于空间欧氏距离精准锁定目标球/彻底根除多红球同色覆盖导致白绿线瞬间消失Bug)、纯净天蓝走位预测线(彻底移除终点白色假想球圆圈)、全台静止瞬间零延迟消隐(彻底删除600ms后置等待/母球停稳瞬间白色落位线即刻清空交接新一杆)、独占击球走位物理保护锁_shotMotionLocked(全台母球未停绝对不退出走位渲染)、绿色瞄准线单向走完终结机制(目标球走完瞄准线或未进袋弹库后立即彻底消失/弹库后绝不再绘制任何轨迹残线)、两杆交接快照深度隔离、低杆真实滑动摩擦阻力模型校准、贴库与亨得利半贴库双平行线擦角检测、死局全自动破局、强化入袋动力学与防停球力度补偿、每日挑战自动化击球、单指双击显隐控制面板、母球摔袋预警与最佳出杆力度推荐
 // @author       assistant
 // @match        *://147master.cn/*
 // @match        *://*.147master.cn/*
@@ -23,7 +23,7 @@
     window[INSTANCE_KEY] = true;
   } catch (_) {}
 
-  const SCRIPT_VERSION = '1.9.16';
+  const SCRIPT_VERSION = '1.9.17';
 
   /* ================================================================== */
   /* 配置                                                                */
@@ -77,6 +77,10 @@
     // 官方物理引擎仿真微推演 (在击打目标球时提供真实母球划弧走位与多库反弹)
     engineSimEnabled: true,
     engineSimDelayMs: 90,
+    // v1.9.17：出杆瞬间按真实出杆输入(shotInput)+击球前球位做 as-struck 引擎复核
+    cueAsStruck: true,
+    // v1.9.17：空台/直吃库边优先走同源引擎全行程仿真（含多库衰减与真实停点）
+    cueFreeEngineEnabled: true,
     cuePostTrajectoryColor: 'rgba(255, 255, 255, 0.95)', // 与白色母球瞄准线保持一致
     cuePostTrajectoryWidthPx: 1.6,
     showGhostStopPosition: true,
@@ -767,8 +771,29 @@
     },
 
     resolvePhysicsParams(loader, force) {
+      // v1.9.17 根因修复（复用 snk-core 3.9.33/3.9.40）：
+      // 页面可能用服务端下发的私有预设实例化内核，window.GAME_CLIENT_CONFIG 只是出厂默认快照。
+      // 第一优先直接向运行中的游戏内核要真实在用的物理参数并标记 fromLive = true。
+      const tgGlobal = (typeof getGameGlobal === 'function') ? getGameGlobal('threeGame') : (typeof window !== 'undefined' ? window.threeGame : null);
+      const core = capturedCore || (tgGlobal && tgGlobal.core) || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
+      try {
+        const live = (core && typeof core.getPhysicsParams === 'function') ? core.getPhysicsParams() : null;
+        if (live && live.v3 && Number.isFinite(live.v3.clothRollingDecelMmS2)) {
+          if (!force && this.params && this.params.fromLive) return this.params;
+          live.fromLive = true;
+          const v3 = live.v3;
+          const pwr = Number.isFinite(v3.maxCuePower) ? v3.maxCuePower : live.maxCuePower;
+          if (Number.isFinite(pwr) && pwr > 0) CONFIG.maxCuePowerMmS = pwr;
+          CONFIG.clothRollingDecelMmS2 = v3.clothRollingDecelMmS2;
+          const slide = Number.isFinite(v3.tableSlidingAccel) ? v3.tableSlidingAccel : live.tableSlidingAccel;
+          if (Number.isFinite(slide) && slide > 0) CONFIG.tableSlidingAccelMmS2 = slide;
+          this.params = live;
+          this.paramsFromConfig = true;
+          return live;
+        }
+      } catch (_) {}
+
       const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
-      const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
       const coreConfig = (core && (typeof core.getConfig === 'function' ? core.getConfig() : core.config)) || {};
       const cfgPh = (cfg && cfg.physics) || {};
       const corePh = (coreConfig && coreConfig.physics) || {};
@@ -842,12 +867,17 @@
 
     getParams() {
       const cfg = (typeof window !== 'undefined' && window.GAME_CLIENT_CONFIG) || {};
-      const core = capturedCore || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
+      const tgGlobal = (typeof getGameGlobal === 'function') ? getGameGlobal('threeGame') : (typeof window !== 'undefined' ? window.threeGame : null);
+      const core = capturedCore || (tgGlobal && tgGlobal.core) || (typeof window !== 'undefined' && window.threeGame && window.threeGame.core);
       const hasDynamicConfig = Boolean(
         (cfg && cfg.physics) ||
-        (core && (core.config || (typeof core.getConfig === 'function' && core.getConfig())))
+        (core && (core.config || (typeof core.getConfig === 'function' && core.getConfig()) || typeof core.getPhysicsParams === 'function'))
       );
-      if (!this.params || (!this.paramsFromConfig && hasDynamicConfig)) {
+      // v1.9.17：脚本常比游戏核心更早初始化；未拿到 fromLive 真实内核参数时每 2 秒自动重探一次。
+      const now = Date.now();
+      const needLiveRetry = Boolean(!this.params || (!this.params.fromLive && (now - (this.__liveTryAt || 0)) > 2000));
+      if (!this.params || (!this.paramsFromConfig && hasDynamicConfig) || needLiveRetry) {
+        this.__liveTryAt = now;
         this.resolvePhysicsParams(this.loadModule || null, false);
       }
       return this.params || {};
@@ -934,9 +964,12 @@
           verticalAngle: shot.verticalAngle || 0,
         },
         physicsOverrides: (() => {
-          // 优先复用游戏 Worker 最近一次真实请求里的物理参数。
-          // 这是当前球桌的内核参数（含 v3 的库边摩擦/鼻高/回弹），
-          // 比本地 getParams() 重建更可靠，直接决定反弹角是否与官方一致。
+          // v1.9.17：已拿到运行中内核的 fromLive 同源物理参数时直接优先使用；
+          // 未拿到 live 参数时，再优先复用游戏 Worker 最近 5 秒内的真实请求参数。
+          const liveParams = this.getParams();
+          if (liveParams && liveParams.fromLive) {
+            return liveParams;
+          }
           const req = NativeWorkerBridge.latestRequest;
           const p = req && req.payload;
           if (p && p.physicsOverrides &&
@@ -944,7 +977,7 @@
               (performance.now() - NativeWorkerBridge.lastRequestTime) < 5000) {
             return p.physicsOverrides;
           }
-          return this.getParams();
+          return liveParams;
         })(),
       };
 
@@ -984,12 +1017,12 @@
       const hitT = Number(hit.t) || 0;
       const at = (frame, id) => (frame.balls || []).find((b) => b.id === id) || null;
 
+      // v1.9.17（对齐 snk-core）：精确捕捉首次碰球之后的任意二次球-球碰撞，不再漏掉 80ms 内或薄球二次接触
       const cueNext = events
         .filter((e) => e.type === 'ball-hit-ball'
           && (e.ballAId === cueId || e.ballBId === cueId)
           && e !== hit
-          && (e.ballAId !== targetId && e.ballBId !== targetId)
-          && Number(e.t) > hitT + 0.08)
+          && Number(e.t) > hitT + 1e-6)
         .sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0))[0] || null;
       const nextT = cueNext ? (Number(cueNext.t) || 0) : Infinity;
       const nextBallId = cueNext ? (cueNext.ballAId === cueId ? cueNext.ballBId : cueNext.ballAId) : null;
@@ -1010,12 +1043,27 @@
 
       const targetPath = sample(targetId, 6, 0);
       let cuePath = sample(cueId, 5, hitT, nextT);
+      const cuePathAfterNext = Number.isFinite(nextT) ? sample(cueId, 5, hitT) : cuePath.slice();
       const lastFrame = frames[frames.length - 1];
       const tb = lastFrame ? at(lastFrame, targetId) : null;
       const cb = lastFrame ? at(lastFrame, cueId) : null;
+      const cueEnd = (cb && cb.pos && Number.isFinite(cb.pos.x) && Number.isFinite(cb.pos.y))
+        ? { x: cb.pos.x, y: cb.pos.y } : null;
 
-      // sample() 以 6mm 最小步长采样，最后一小段蠕动可能不足 6mm 而被丢掉；
-      // 这里补上目标球最终停点，保证蓝线终点/停点标记就是引擎真实停点。
+      // 补上母球与目标球的末帧精确停点，避免 5mm/6mm 最小采样步长丢掉最后慢速收尾段
+      if (cueEnd && !cb.potted) {
+        if (!Number.isFinite(nextT)) {
+          const lastCue = cuePath[cuePath.length - 1];
+          if (!lastCue || Math.hypot(cueEnd.x - lastCue.x, cueEnd.y - lastCue.y) > 0.01) {
+            cuePath.push({ x: cueEnd.x, y: cueEnd.y });
+          }
+        }
+        const lastFull = cuePathAfterNext[cuePathAfterNext.length - 1];
+        if (!lastFull || Math.hypot(cueEnd.x - lastFull.x, cueEnd.y - lastFull.y) > 0.01) {
+          cuePathAfterNext.push({ x: cueEnd.x, y: cueEnd.y });
+        }
+      }
+
       if (tb && tb.pos && !tb.potted &&
           Number.isFinite(tb.pos.x) && Number.isFinite(tb.pos.y)) {
         const lastTarget = targetPath[targetPath.length - 1];
@@ -1025,7 +1073,6 @@
       }
 
       // 目标球第一次真实碰库事件：用事件时间切出「第一库之后」的官方轨迹。
-      // 比按最近点匹配更可靠，避免目标球多库折返后靠近首库点时切错位置。
       const targetRailEvent = events
         .filter((e) => e && e.type === 'ball-hit-rail' &&
           (e.ballId === targetId || e.ballAId === targetId || e.ballBId === targetId) &&
@@ -1044,8 +1091,13 @@
         }
       }
 
-      // 库边阻尼与旋转损耗定标 (根据 39 杆实测数据真实拟合，低杆与多次碰库不再过度截断)
-      if (cuePath.length >= 2) {
+      // v1.9.17（复用 snk-core 3.9.38）：引擎参数与游戏内核同源(fromLive)时，输出即为真实物理轨迹，
+      // 严禁再乘经验截断系数 CALIB_RATIOS 造成人为偏短；仅在非 live 回退模式下保留经验定标。
+      const isLiveParams = Boolean(
+        (this.params && this.params.fromLive) ||
+        (payload && payload.physicsOverrides && payload.physicsOverrides.fromLive)
+      );
+      if (!isLiveParams && cuePath.length >= 2) {
         const railBounces = events.filter((e) => e.type === 'ball-hit-rail' &&
           (e.ballId === cueId || e.ballAId === cueId || e.ballBId === cueId) &&
           Number(e.t) >= hitT - 1e-6 && Number(e.t) <= nextT + 1e-6).length;
@@ -1055,7 +1107,6 @@
         const tipY = (payload.shot && payload.shot.tipOffset && Number(payload.shot.tipOffset.y)) || 0;
         const tipCategory = tipY > 0.15 ? 'follow' : (tipY < -0.15 ? 'draw' : 'mid');
 
-        // 实测经验矩阵: { 0库, 1库, 2+库 }
         const CALIB_RATIOS = {
           mid:    { 0: 0.98, 1: 0.97, 2: 0.95 },
           follow: { 0: 0.99, 1: 0.96, 2: 0.95 },
@@ -1079,6 +1130,9 @@
         targetFirstRailT,
         targetPathAfterRail,
         cuePath,
+        cuePathAfterNext,
+        cueEnd,
+        fromLive: isLiveParams,
         potted: Boolean(tb && tb.potted),
         cuePotted: Boolean(cb && cb.potted),
         cueNextBallId: nextBallId,
@@ -1205,6 +1259,174 @@
 
 
 
+    // v1.9.17：同步影子仿真（复用 snk-core __shadowCur 机制）。
+    // 参数指纹命中缓存直接零开销返回；未命中时同步调用游戏原生 simulateShot() 直出当帧精确路径，
+    // 消除节流空窗期退回粗糙解析模型导致的精度掉崖与长短跳变。
+    runShadow(key, factory, contextInfo = null) {
+      if (!CONFIG.engineSimEnabled) return null;
+      if (this.status === 'idle') this.load();
+      if (this.status !== 'ready' || !this.fn) {
+        return this.get(key, factory, contextInfo);
+      }
+      if (this._shadowKey === key && this._shadowResult) {
+        return this._shadowResult;
+      }
+      try {
+        const res = this.run(factory());
+        this._shadowKey = key;
+        this._shadowResult = res;
+        this.key = key;
+        this.result = res;
+        this.resultContext = contextInfo;
+        return res;
+      } catch (err) {
+        devLog('warn', '[影子仿真] 同步复算异常，退回异步通道:', err);
+        return this.get(key, factory, contextInfo);
+      }
+    },
+
+    // v1.9.17：空台/直吃库边同源全行程仿真（复用 snk-core 3.9.35 engineCueFree）。
+    // 在内核 live 参数就绪时，直接用原生引擎跑满 20s 提取完整多库弧线与真实停点（含侧塞弧线与库边衰减）。
+    engineCueFree(cuePos, dir, power, tip, elevDeg, state) {
+      if (!CONFIG.cueFreeEngineEnabled || !CONFIG.engineSimEnabled) return null;
+      if (this.status === 'idle') this.load();
+      if (this.status !== 'ready' || !this.fn) return null;
+      const params = this.getParams();
+      if (!params || !params.fromLive || !params.v3) return null;
+      const p = clamp(Number(power) || 0, 0, 100);
+      if (p <= 0.5 || !cuePos || !dir) return null;
+
+      const tx = clamp(Number(tip && tip.x) || 0, -CONFIG.maxTipOffsetRatio, CONFIG.maxTipOffsetRatio);
+      const ty = clamp(Number(tip && tip.y) || 0, -CONFIG.maxTipOffsetRatio, CONFIG.maxTipOffsetRatio);
+      const dn = Math.hypot(dir.x, dir.y) || 1;
+      const dx = dir.x / dn;
+      const dy = dir.y / dn;
+      const elev = clamp(Number(elevDeg) || 0, 0, 90);
+
+      const liteCfg = (typeof window !== 'undefined' && window.SnookerLocalLiteConfig) || null;
+      const boundary = (liteCfg && liteCfg.boundary) ||
+        (state && state.table && state.table.tableBoundaryId) ||
+        'local-table-892b5cb90e552ac1a09f-pockets-v2';
+
+      const cacheKey = [
+        Math.round(cuePos.x), Math.round(cuePos.y),
+        Math.round(Math.atan2(dy, dx) * 1800 / Math.PI),
+        Math.round(p * 10), tx.toFixed(3), ty.toFixed(3), Math.round(elev * 10),
+        boundary,
+      ].join('|');
+
+      if (!this._freeCache) this._freeCache = new Map();
+      if (this._freeCache.has(cacheKey)) return this._freeCache.get(cacheKey);
+
+      try {
+        // 优先使用沙箱内提取的模块 2，避免干扰页面全局实例
+        let api = null;
+        try { api = this.loadModule ? this.loadModule(2) : null; } catch (_) { api = null; }
+        if (!api) api = this.payloadApi();
+        if (!api) return null;
+
+        let pl = null;
+        if (typeof api.createShotRuntimePayloadFromState === 'function') {
+          const singleState = {
+            cueBallId: 'eng-cue',
+            balls: [{ id: 'eng-cue', kind: 'cue', pos: { x: cuePos.x, y: cuePos.y }, radius: BALL_RADIUS_MM, potted: false }],
+            table: { tableBoundaryId: boundary },
+          };
+          pl = api.createShotRuntimePayloadFromState(singleState, {
+            direction: { x: dx, y: dy },
+            power: p,
+            tipOffset: { x: tx, y: ty },
+            verticalAngle: elev,
+          }, {
+            physicsHz: 120,
+            physicsOverrides: {
+              physicsEngine: 'v3',
+              v3: Object.assign({}, params.v3),
+              ballClusterLogic: 'hybrid',
+              targetPhysicsHz: 120,
+              pocketCaptureMode: 'angle',
+              pocketVisualMotionEnabled: true,
+            },
+            captureFrames: true,
+            maxSeconds: 20,
+            matchRules: false,
+            extra: {},
+          });
+        } else if (typeof api.createShotRuntimePayload === 'function') {
+          pl = api.createShotRuntimePayload({
+            tableBoundaryId: boundary,
+            cueBallId: 'eng-cue',
+            balls: [{ id: 'eng-cue', kind: 'cue', pos: { x: cuePos.x, y: cuePos.y }, radius: BALL_RADIUS_MM, potted: false }],
+            shot: { direction: { x: dx, y: dy }, power: p, tipOffset: { x: tx, y: ty }, verticalAngle: elev },
+            physicsOverrides: params,
+          });
+        }
+        if (!pl) return null;
+
+        const res = this.fn(pl);
+        const frames = res && Array.isArray(res.frames) ? res.frames : [];
+        const events = res && Array.isArray(res.events) ? res.events : [];
+        if (frames.length < 2) return null;
+
+        const firstRailEv = events
+          .filter((e) => e && (e.type === 'ball-hit-rail' || e.type === 'ball-hit-pocket-jaw'))
+          .sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0))[0] || null;
+        const firstRailT = firstRailEv && Number.isFinite(Number(firstRailEv.t)) ? Number(firstRailEv.t) : null;
+
+        const fullPts = [];
+        const afterRailPts = [];
+        let lastFull = null;
+        let lastAfter = null;
+        let totalLen = 0;
+
+        for (let i = 0; i < frames.length; i++) {
+          const f = frames[i];
+          const b = (f.balls || []).find((x) => x && x.id === 'eng-cue');
+          if (!b || !b.pos || !Number.isFinite(b.pos.x) || !Number.isFinite(b.pos.y)) continue;
+          const pt = { x: b.pos.x, y: b.pos.y };
+          if (!lastFull || Math.hypot(pt.x - lastFull.x, pt.y - lastFull.y) >= 4) {
+            if (lastFull) totalLen += Math.hypot(pt.x - lastFull.x, pt.y - lastFull.y);
+            fullPts.push(pt);
+            lastFull = pt;
+          }
+          if (firstRailT != null && Number(f.t) >= firstRailT - 1e-6) {
+            if (!lastAfter || Math.hypot(pt.x - lastAfter.x, pt.y - lastAfter.y) >= 4) {
+              afterRailPts.push(pt);
+              lastAfter = pt;
+            }
+          }
+        }
+
+        const lastFrame = frames[frames.length - 1];
+        const lastBall = lastFrame ? (lastFrame.balls || []).find((x) => x && x.id === 'eng-cue') : null;
+        if (lastBall && lastBall.pos && !lastBall.potted && Number.isFinite(lastBall.pos.x)) {
+          const endPt = { x: lastBall.pos.x, y: lastBall.pos.y };
+          if (!lastFull || Math.hypot(endPt.x - lastFull.x, endPt.y - lastFull.y) > 0.05) fullPts.push(endPt);
+          if (afterRailPts.length && (!lastAfter || Math.hypot(endPt.x - lastAfter.x, endPt.y - lastAfter.y) > 0.05)) {
+            afterRailPts.push(endPt);
+          }
+        }
+
+        if (fullPts.length < 2) return null;
+        const out = {
+          points: fullPts,
+          afterRailPath: afterRailPts.length >= 2 ? afterRailPts : null,
+          firstRailPoint: afterRailPts.length ? afterRailPts[0] : null,
+          end: fullPts[fullPts.length - 1],
+          travelledMm: totalLen,
+          bounces: events.filter((e) => e && e.type === 'ball-hit-rail').length,
+          cuePotted: Boolean(lastBall && lastBall.potted),
+          source: 'engine-free',
+        };
+        if (this._freeCache.size > 240) this._freeCache.clear();
+        this._freeCache.set(cacheKey, out);
+        return out;
+      } catch (err) {
+        devLog('warn', '[空台引擎仿真] 执行异常，退回两库复算:', err);
+        return null;
+      }
+    },
+
     get(key, factory, contextInfo = null) {
       if (!CONFIG.engineSimEnabled) return null;
       if (this.status === 'idle') this.load();
@@ -1219,21 +1441,17 @@
         Math.abs(this.resultContext.aimAngle - contextInfo.aimAngle) < 0.08
       );
 
-      // 若 key 完全一致且上下文匹配，直接返回精确结果
       if (this.key === key && this.result && isContextValid) {
         return this.result;
       }
 
-      // 仅当上下文相符时允许返回过渡标记数据；若不相符则坚决返回 null，杜绝拿上一球路径拼凑乱画
       const stale = isContextValid ? { ...this.result, stale: true } : null;
 
       this.pendingKey = key;
       this.payloadFactory = factory;
       this.pendingContext = contextInfo;
 
-      const now = performance.now();
-      const THROTTLE_MS = 45; // 45ms 稳定时间片节流，消除长达 1~2 秒的无休止防抖重置卡顿
-
+      // v1.9.17（复用 snk-core latest-wins 合并调度）：按实际仿真耗时动态排期（8~40ms），不再硬卡 45ms
       const executeRun = () => {
         this.timer = 0;
         this.lastRunTime = performance.now();
@@ -1248,6 +1466,7 @@
         const pendingKey = this.pendingKey;
         const factoryNow = this.payloadFactory;
         const ctxNow = this.pendingContext;
+        if (!pendingKey || !factoryNow) return;
         try {
           const result = this.run(factoryNow());
           this.key = pendingKey;
@@ -1258,18 +1477,19 @@
           this.status = 'failed';
           this.result = null;
           this.resultContext = null;
+          this.pendingKey = null;
+          return;
+        }
+        if (this.pendingKey && this.pendingKey !== this.key) {
+          const gap = Math.max(8, Math.min(40, Math.round((this.simMs || 10) * 1.1)));
+          this.timer = setTimeout(executeRun, gap);
+          return;
         }
         this.pendingKey = null;
       };
 
-      // 节流调度：超过 45ms 立即执行最新帧，否则等待本周期结束后立即执行，保证后台流式持续刷新
-      if (!this.lastRunTime || now - this.lastRunTime >= THROTTLE_MS) {
-        clearTimeout(this.timer);
-        this.timer = 0;
-        executeRun();
-      } else if (!this.timer) {
-        const remainMs = Math.max(10, THROTTLE_MS - (now - this.lastRunTime));
-        this.timer = setTimeout(executeRun, remainMs);
+      if (!this.timer) {
+        this.timer = setTimeout(executeRun, 0);
       }
 
       return stale;
@@ -1774,21 +1994,76 @@
     return `${yText}${xText}`;
   }
 
+  function getLiveCoreInstance() {
+    try {
+      const tg = getGameGlobal('threeGame');
+      if (tg && tg.core) return tg.core;
+    } catch (_) {}
+    return capturedCore || null;
+  }
+
+  function clampTipToDisk(rawX, rawY) {
+    const maxOff = Math.max(0.05, Number(CONFIG.maxTipOffsetRatio) || 0.5);
+    let x = Number(rawX) || 0;
+    let y = Number(rawY) || 0;
+    const len = Math.hypot(x, y);
+    if (len > maxOff) {
+      x = (x / len) * maxOff;
+      y = (y / len) * maxOff;
+    }
+    return { x, y };
+  }
+
   function resolveEffectiveTip(state) {
     if (!state) return { x: 0, y: 0 };
-    const cand = (state.aim && (state.aim.tipOffset || state.aim.tip || state.aim.spin)) ||
-      (state.shot && (state.shot.tipOffset || state.shot.tip || state.shot.spin)) ||
+    // v1.9.17（复用 snk-core 3.9.27）：第一优先直接向运行中核心询问真实杆头偏移 core.getTip()，
+    // 避免 state.shot / state.spin 量纲不齐或残留旧值；并统一做 0.5R 圆形截断对齐引擎 clampTipOffsetCircle。
+    try {
+      const core = getLiveCoreInstance();
+      if (core && typeof core.getTip === 'function') {
+        const gt = core.getTip();
+        if (gt && (Number.isFinite(Number(gt.x)) || Number.isFinite(Number(gt.y)))) {
+          return clampTipToDisk(gt.x, gt.y);
+        }
+      }
+    } catch (_) {}
+    const cand = (state.aim && (state.aim.tipOffset || state.aim.tip)) ||
       state.tipOffset ||
       state.tip ||
+      (isShotOrMoving(state) && state.shot && (state.shot.tipOffset || state.shot.tip)) ||
+      (state.aim && state.aim.spin) ||
       state.spin ||
       (state.cue && (state.cue.tipOffset || state.cue.tip));
-    if (cand && (Number.isFinite(cand.x) || Number.isFinite(cand.y))) {
-      return {
-        x: clamp(Number(cand.x) || 0, -1, 1),
-        y: clamp(Number(cand.y) || 0, -1, 1),
-      };
+    if (cand && (Number.isFinite(Number(cand.x)) || Number.isFinite(Number(cand.y)))) {
+      return clampTipToDisk(cand.x, cand.y);
     }
     return { x: 0, y: 0 };
+  }
+
+  // v1.9.17（复用 snk-core cueElevation）：优先读当前瞄准态 verticalAngle 与 core.getCuePose().elevation，
+  // 绝不把上一杆残留的 state.shot.verticalAngle 或硬编码 2.5° 当成本杆仰角。
+  function resolveCueElevation(state) {
+    if (!state) return 0;
+    if (state.aim && Number.isFinite(Number(state.aim.verticalAngle))) {
+      return clamp(Number(state.aim.verticalAngle), 0, 90);
+    }
+    try {
+      const core = getLiveCoreInstance();
+      if (core && typeof core.getCuePose === 'function') {
+        const pose = core.getCuePose();
+        if (pose && Number.isFinite(Number(pose.elevation))) {
+          return clamp(Number(pose.elevation), 0, 90);
+        }
+      }
+    } catch (_) {}
+    const pose = state.cuePose || state.cue;
+    if (pose && Number.isFinite(Number(pose.elevation))) {
+      return clamp(Number(pose.elevation), 0, 90);
+    }
+    if (isShotOrMoving(state) && state.shot && Number.isFinite(Number(state.shot.verticalAngle))) {
+      return clamp(Number(state.shot.verticalAngle), 0, 90);
+    }
+    return 0;
   }
 
   let _turnPowerActive = false;
@@ -1805,18 +2080,24 @@
 
   function extractRawStatePower(state) {
     if (!state) return null;
-    // 优先取游戏渲染层实时力度 state.power（拉杆时实时变动，未拉杆或停球后为 0）。
-    // 0 是合法状态，不能因为 state.power 为 0 就继续回退到上一杆的 shot.power。
+    // v1.9.17（复用 snk-core 3.9.27）：优先向游戏核心询问出杆真实力度 core.getPower()
+    try {
+      const core = getLiveCoreInstance();
+      if (core && typeof core.getPower === 'function') {
+        const gp = Number(core.getPower());
+        if (Number.isFinite(gp) && gp > 0) return gp;
+      }
+    } catch (_) {}
+    // 优先取当前瞄准/蓄力力度 aim.power（非 0 时优先，避免残留 state.power 抢占）
+    if (state.aim && state.aim.power != null && Number.isFinite(Number(state.aim.power)) && Number(state.aim.power) > 0) {
+      return Number(state.aim.power);
+    }
     if (state.power != null && Number.isFinite(Number(state.power)) && Number(state.power) > 0) {
       return Number(state.power);
     }
-    // v1.9.16：aim.power 是当前瞄准/蓄力力度，未蓄力时就是 0。
-    // 旧逻辑用 >0 过滤，0 会掉进下面的 shot.power 分支；而 shot.power 保存的是
-    // 上一杆的出杆力度，导致第 n+1 杆未出杆就继承第 n 杆的力度、HUD 与辅助线。
     if (state.aim && state.aim.power != null && Number.isFinite(Number(state.aim.power))) {
       return Number(state.aim.power);
     }
-    // 没有 aim 时，才允许使用 state.power 的 0。
     if (state.power != null && Number.isFinite(Number(state.power))) {
       return Number(state.power);
     }
@@ -6464,7 +6745,7 @@
       // 准星未指向任何球时：母球瞄准线直接射向库边
       // 终点位于距离库边 1 个球半径处 (即 boundX / boundY 处的母球球心位置，而不是直接接触库边)
       const railHit = rayRailHit(cue.pos, d, boundX, boundY, pockets);
-      const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+      const vertAngle = resolveCueElevation(state);
 
       // 母球直射库边：只使用官方内核两库段复算。
       // 起点 = 第一库接触点；终点 = 反弹后的第二库接触点。
@@ -6472,36 +6753,52 @@
       result.noTargetEnd = railHit ? railHit.point : null;
       if (railHit && effPower > 0) {
         try {
-          const rbPayload = engineSim.buildPayload(state, {
-            direction: d,
-            power: effPower,
-            tip,
-            verticalAngle: vertAngle,
-          });
-          const rbKey = [
-            Math.round(effPower * 10),
-            Math.round(d.x * 1000),
-            Math.round(d.y * 1000),
-            Math.round(cue.pos.x),
-            Math.round(cue.pos.y),
-            Math.round(vertAngle * 10),
-            Math.round(Number(tip && tip.x || 0) * 1000),
-            Math.round(Number(tip && tip.y || 0) * 1000),
-            allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
-          ].join('|');
-          const nativeReb = engineSim.nativeTwoRail(rbPayload, rbKey);
-          if (nativeReb) {
-            result.noTargetEnd = nativeReb.path[0];
+          // v1.9.17：优先走同源内核全行程仿真 engineCueFree（含侧塞弧线、多库衰减与真实停点），
+          // 未就绪或未命中首库时自动回退 nativeTwoRail。
+          const freeSim = engineSim.engineCueFree(cue.pos, d, effPower, tip, vertAngle, state);
+          if (freeSim && Array.isArray(freeSim.afterRailPath) && freeSim.afterRailPath.length >= 2) {
+            result.noTargetEnd = freeSim.firstRailPoint || freeSim.afterRailPath[0];
             result.cuePost = {
-              cueCushionPaths: [ nativeReb.path ],
-              restPos: nativeReb.path[nativeReb.path.length - 1],
+              cueCushionPaths: [ freeSim.afterRailPath ],
+              restPos: freeSim.end,
               nativeLocal: true,
-              travelledMm: nativeReb.travelledMm,
-              secondRailHit: Boolean(nativeReb.secondRailHit),
+              engineFree: true,
+              travelledMm: freeSim.travelledMm,
+              bounces: freeSim.bounces,
+              secondRailHit: freeSim.bounces >= 2,
             };
+          } else {
+            const rbPayload = engineSim.buildPayload(state, {
+              direction: d,
+              power: effPower,
+              tip,
+              verticalAngle: vertAngle,
+            });
+            const rbKey = [
+              Math.round(effPower * 10),
+              Math.round(d.x * 1000),
+              Math.round(d.y * 1000),
+              Math.round(cue.pos.x),
+              Math.round(cue.pos.y),
+              Math.round(vertAngle * 10),
+              Math.round(Number(tip && tip.x || 0) * 1000),
+              Math.round(Number(tip && tip.y || 0) * 1000),
+              allBalls.map((b) => `${b.id}:${Math.round(b.pos.x)}:${Math.round(b.pos.y)}`).join(','),
+            ].join('|');
+            const nativeReb = engineSim.nativeTwoRail(rbPayload, rbKey);
+            if (nativeReb) {
+              result.noTargetEnd = nativeReb.path[0];
+              result.cuePost = {
+                cueCushionPaths: [ nativeReb.path ],
+                restPos: nativeReb.path[nativeReb.path.length - 1],
+                nativeLocal: true,
+                travelledMm: nativeReb.travelledMm,
+                secondRailHit: Boolean(nativeReb.secondRailHit),
+              };
+            }
           }
         } catch (err) {
-          devLog('warn', '[反弹] 官方内核两库复算调用异常', err);
+          devLog('warn', '[反弹] 官方内核反弹复算调用异常', err);
         }
       }
       return result;
@@ -6619,7 +6916,7 @@
         if (CONFIG.showObjectRebound) {
           try {
             const livePhy = getLivePhysicsOverrides();
-            const targetVertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+            const targetVertAngle = resolveCueElevation(state);
             // v1.9.11：静态瞄准阶段 state.power 往往为 0，不能再用固定的 50%
             // 伪造出一条“看起来能走到”的目标球反弹线；只有玩家真正给到力度才推演。
             const initialPower = effPower > 2 ? effPower : 0;
@@ -6866,7 +7163,7 @@
     }
 
     // 官方物理引擎无头微模拟器推演 (模块 68 真实复算，未出杆/拉杆力度为0时不启动走位推演)
-    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+    const vertAngle = resolveCueElevation(state);
     let engine = null;
     if (CONFIG.engineSimEnabled && effPower > 0) {
       const engineKey = [
@@ -6890,7 +7187,8 @@
         aimAngle,
       };
 
-      engine = engineSim.get(engineKey, () => engineSim.buildPayload(state, {
+      // v1.9.17：内核就绪时优先走同步影子仿真 runShadow()，当帧直出同源真实路径，不再滞后退回粗糙解析线
+      engine = engineSim.runShadow(engineKey, () => engineSim.buildPayload(state, {
         direction: d,
         power: effPower,
         tip,
@@ -6995,21 +7293,46 @@
       }
     }
 
-    // 母球碰后真实走位弧线：高精微仿真优先，节流期间 0ms 瞬时解析物理折线无缝兜底
+    // 母球碰后真实走位弧线：同步影子仿真直出（零二次扭曲），二次碰球后以淡色尾段续接至真实停点
     if (CONFIG.showCuePostTrajectory && effPower > 0) {
       let cuePostPath = null;
+      let cuePostTail = null;
       let cuePostMethod = 'algo';
       if (engine && Array.isArray(engine.cuePath) && engine.cuePath.length >= 1) {
         cuePostPath = [{ x: G.x, y: G.y }, ...engine.cuePath];
-        cuePostMethod = 'engineSim';
+        cuePostMethod = engine.fromLive ? 'engineSim-live' : 'engineSim';
+        // v1.9.17（复用 snk-core 3.6.36/3.9.25）：保留二次碰球之后的真实引擎尾段（最近点 <= 8mm 衔接，防横跳）
+        if (engine.cueNextBallId && Array.isArray(engine.cuePathAfterNext) && engine.cuePathAfterNext.length >= 2) {
+          const lastMain = cuePostPath[cuePostPath.length - 1];
+          let si = 0;
+          let bestDist = Infinity;
+          for (let i = 0; i < engine.cuePathAfterNext.length; i++) {
+            const p = engine.cuePathAfterNext[i];
+            const dd = Math.hypot(p.x - lastMain.x, p.y - lastMain.y);
+            if (dd < bestDist) {
+              bestDist = dd;
+              si = i;
+            }
+          }
+          if (bestDist <= 8 && si < engine.cuePathAfterNext.length - 1) {
+            const tail = engine.cuePathAfterNext.slice(si).map((q) => ({ x: q.x, y: q.y }));
+            if (tail.length >= 2 && polylineLength(tail) >= 15) {
+              cuePostTail = tail;
+            }
+          }
+        }
       } else {
-        // 0ms 瞬时解析物理走位线：拖动力度条时 60FPS 实时丝滑跟手变动，彻底告别 1~2 秒僵滞！
+        // 仅在引擎 bundle 尚未加载完成前使用 0ms 解析物理兜底
         cuePostPath = simulateInstantCuePostTrajectory(G, targetBall.pos, d, effPower, tip, boundX, boundY, pockets);
         cuePostMethod = 'algo';
       }
       if (cuePostPath && cuePostPath.length >= 2) {
         result.cuePostTrajectory = cuePostPath;
-        result.cueRestPos = cuePostPath[cuePostPath.length - 1];
+        if (cuePostTail) result.cuePostTailTrajectory = cuePostTail;
+        const trueRest = (engine && engine.cueEnd && !engine.cuePotted)
+          ? { x: engine.cueEnd.x, y: engine.cueEnd.y }
+          : (cuePostTail ? cuePostTail[cuePostTail.length - 1] : cuePostPath[cuePostPath.length - 1]);
+        result.cueRestPos = trueRest;
         result.cuePostMethod = cuePostMethod;
       }
     }
@@ -7150,7 +7473,7 @@
     if (!geomPred) return null;
     const power = resolveEffectivePower(state);
     const tip = resolveEffectiveTip(state);
-    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+    const vertAngle = resolveCueElevation(state);
 
     const centerSpeed = resolveCueSpeed(power);
     const retention = tipSpeedRetention(tip);
@@ -7605,7 +7928,7 @@
 
     const effTip = resolveEffectiveTip(state);
     const effPower = resolveEffectivePower(state);
-    const vertAngle = Number(state.shot?.verticalAngle ?? state.aim?.verticalAngle ?? 2.5);
+    const vertAngle = resolveCueElevation(state);
 
     const geomKey = [
       cue.pos.x.toFixed(1), cue.pos.y.toFixed(1),
@@ -7658,6 +7981,81 @@
   }
 
   let _lastSnapshotError = null;
+  let _prevStaticBallsSnapshot = null;
+
+  // v1.9.17（复用 snk-core 3.9.49 as-struck 复核）：
+  // 在出杆首帧，用「击球前一帧静止球位 + 游戏真实出杆输入 state.shot.shotInput」跑一次同源引擎，
+  // 消除松手前最后一帧手抖/力度/加塞未同步造成的冻结落位误差。
+  function runAsStruckCueReview(state, prevBalls) {
+    if (!CONFIG.cueAsStruck || !CONFIG.showCuePostTrajectory) return null;
+    if (!state || !Array.isArray(prevBalls) || prevBalls.length < 2) return null;
+    if (engineSim.status !== 'ready' || !engineSim.fn) return null;
+    try {
+      const si = (state.shot && state.shot.shotInput) || (state.activeShot && state.activeShot.shotInput) || null;
+      const rawShot = state.shot || state.activeShot || null;
+      const aimDir = (rawShot && rawShot.direction) || (state.aim && state.aim.direction) || null;
+      if (!aimDir || !Number.isFinite(Number(aimDir.x)) || !Number.isFinite(Number(aimDir.y))) return null;
+      const dir = V.norm(aimDir);
+      if (V.len(dir) < 1e-6) return null;
+
+      const rawPower = si && Number.isFinite(Number(si.power)) ? Number(si.power) : resolveShotSnapshotPower(state);
+      if (!Number.isFinite(rawPower) || rawPower <= 2) return null;
+      const rawTip = (si && si.tipOffset) ? si.tipOffset : ((rawShot && rawShot.tipOffset) ? rawShot.tipOffset : resolveEffectiveTip(state));
+      const tip = clampTipToDisk(rawTip && rawTip.x, rawTip && rawTip.y);
+      const vertAngle = (si && Number.isFinite(Number(si.verticalAngle)))
+        ? clamp(Number(si.verticalAngle), 0, 90)
+        : resolveCueElevation(state);
+
+      const stLike = {
+        balls: prevBalls,
+        cueBallId: state.cueBallId || 'cue',
+        table: state.table,
+      };
+      const payload = engineSim.buildPayload(stLike, {
+        direction: dir,
+        power: rawPower,
+        tip,
+        verticalAngle: vertAngle,
+      });
+      const res = engineSim.run(payload);
+      if (!res || !res.hit || !Array.isArray(res.cuePath) || res.cuePath.length < 2) return null;
+
+      const cuePath = res.cuePath.map((q) => ({ x: q.x, y: q.y }));
+      let cueTail = null;
+      if (res.cueNextBallId && Array.isArray(res.cuePathAfterNext) && res.cuePathAfterNext.length >= 2) {
+        const lastMain = cuePath[cuePath.length - 1];
+        let siIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < res.cuePathAfterNext.length; i++) {
+          const p = res.cuePathAfterNext[i];
+          const dd = Math.hypot(p.x - lastMain.x, p.y - lastMain.y);
+          if (dd < bestDist) {
+            bestDist = dd;
+            siIdx = i;
+          }
+        }
+        if (bestDist <= 8 && siIdx < res.cuePathAfterNext.length - 1) {
+          const tail = res.cuePathAfterNext.slice(siIdx).map((q) => ({ x: q.x, y: q.y }));
+          if (tail.length >= 2 && polylineLength(tail) >= 15) cueTail = tail;
+        }
+      }
+      const restPos = (res.cueEnd && !res.cuePotted)
+        ? { x: res.cueEnd.x, y: res.cueEnd.y }
+        : (cueTail ? cueTail[cueTail.length - 1] : cuePath[cuePath.length - 1]);
+      return {
+        power: rawPower,
+        tip,
+        verticalAngle: vertAngle,
+        cuePath,
+        cueTail,
+        restPos,
+        fromLive: Boolean(res.fromLive),
+      };
+    } catch (err) {
+      devLog('warn', '[as-struck] 出杆瞬时复核失败:', err);
+      return null;
+    }
+  }
 
   // 用实际出杆力度重建一次预测，避免把出杆前 50% 兜底预览当成冻结快照。
   function buildShotSnapshotPrediction(state) {
@@ -7815,6 +8213,9 @@
         ? { cueCushionPaths: pred.cuePost.cueCushionPaths.map((p) => snapshotPoints(p)).filter(Boolean) }
         : null,
       cuePostTrajectory: snapshotPoints(pred.cuePostTrajectory),
+      cuePostTailTrajectory: snapshotPoints(pred.cuePostTailTrajectory),
+      cueRestPos: snapshotPoint(pred.cueRestPos),
+      cuePostMethod: pred.cuePostMethod || null,
       noTargetEnd: snapshotPoint(pred.noTargetEnd),
       railHit: pred.railHit ? {
         t: pred.railHit.t,
@@ -9814,6 +10215,29 @@
           ctx.stroke();
           ctx.restore();
         }
+        // v1.9.17：二次碰球后的引擎续接尾段（稍淡区分主段与二次碰球后走势）
+        if (Array.isArray(pred.cuePostTailTrajectory) && pred.cuePostTailTrajectory.length >= 2) {
+          const tailProj = this.projectPolyline(pred.cuePostTailTrajectory, cueWorld);
+          if (tailProj.segments.length > 0) {
+            hasProjected = true;
+            ctx.save();
+            this.clipToTable(ctx, pred.tableBounds);
+            ctx.globalAlpha = 0.62;
+            ctx.strokeStyle = CONFIG.cuePostTrajectoryColor || CONFIG.cueLineColor || 'rgba(255, 255, 255, 0.95)';
+            ctx.lineWidth = Math.max(1.2, (CONFIG.cuePostTrajectoryWidthPx || 1.6) * 0.9);
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            for (const seg of tailProj.segments) {
+              ctx.moveTo(seg[0].x, seg[0].y);
+              ctx.lineTo(seg[1].x, seg[1].y);
+              drawnSegments.push(seg);
+            }
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
       }
 
       // 4) 反向擦除所有遮挡瞄准线的球体 3D 投影区域 (优先使用台面实时球位，确保出杆运动中实时遮挡贴合)
@@ -11258,6 +11682,18 @@
         if (observedPower > 2) {
           _lastAimPowerObserved = clamp(observedPower, 0, 100);
         }
+        // v1.9.17：记录静态瞄准期间的最新球位快照，供出杆瞬间 as-struck 复核使用
+        if (!_wasInShot && Array.isArray(state.balls) && state.balls.length >= 2) {
+          _prevStaticBallsSnapshot = state.balls
+            .filter((b) => b && b.pos && Number.isFinite(b.pos.x) && Number.isFinite(b.pos.y))
+            .map((b) => ({
+              id: b.id,
+              kind: b.kind,
+              pos: { x: b.pos.x, y: b.pos.y },
+              radius: Number.isFinite(b.radius) ? b.radius : BALL_RADIUS_MM,
+              potted: Boolean(b.potted),
+            }));
+        }
       }
 
       if (shot || (_wasInShot && !still) || _shotMotionLocked) {
@@ -11276,7 +11712,6 @@
           resetTargetMotionState();
           resetCueMotionState();
           // v1.9.9：下一杆出杆瞬间先清掉上一杆的目标球反弹冻结线，再建立本杆快照。
-          // 这样旧线严格在“下一杆出杆”这一帧消失，而不是停球后再被新瞄准线覆盖。
           clearRetainedShotPrediction();
           // 先清空上一杆的力度基准，避免本杆力度缺失时把上一杆的值继续当成本杆。
           _lastShotPowerForTurn = null;
@@ -11285,6 +11720,20 @@
           _retainedShotPred = freezeRetainedPrediction(
             normalizeRetainedPower(retainedSource)
           );
+          // v1.9.17：出杆瞬间 as-struck 复核（击球前一帧球位 + 游戏实际出杆 shotInput）
+          const asStruck = runAsStruckCueReview(state, _prevStaticBallsSnapshot);
+          if (asStruck && _retainedShotPred) {
+            const contactPt = _retainedShotPred.target && _retainedShotPred.target.contact;
+            _retainedShotPred.cuePostTrajectory = contactPt
+              ? [{ x: contactPt.x, y: contactPt.y }, ...asStruck.cuePath]
+              : asStruck.cuePath;
+            _retainedShotPred.cuePostTailTrajectory = asStruck.cueTail || null;
+            _retainedShotPred.cueRestPos = asStruck.restPos;
+            _retainedShotPred.cuePostMethod = asStruck.fromLive ? 'as-struck-live' : 'as-struck';
+            _retainedShotPred.power = asStruck.power;
+            _retainedShotPred.shot = { ...(_retainedShotPred.shot || {}), power: asStruck.power };
+            _retainedShotPred.tip = asStruck.tip;
+          }
           // v1.9.12：母球吃库反弹折线同样在出杆这一帧定格；
           // 若快照为空则退回本杆实际来源，绝不使用之后重新预测的路径。
           retainCueCushionPath(_retainedShotPred || retainedSource);
@@ -11612,7 +12061,9 @@
       getCushionLabel,
       formatTipEnglish,
       resolveEffectiveTip,
+      resolveCueElevation,
       resolveEffectivePower,
+      runAsStruckCueReview,
       powerLock,
       resetTurnPowerState,
       extractRawStatePower,
@@ -11670,6 +12121,3 @@
 
   boot();
 })();
-
-
-
